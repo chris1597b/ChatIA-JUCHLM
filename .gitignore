@@ -1,0 +1,23 @@
+# Entorno virtual de Python
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Bases vectoriales Chroma
+chroma_db/
+chromadb/
+
+# Variables de entorno
+.env
+.env.*
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
