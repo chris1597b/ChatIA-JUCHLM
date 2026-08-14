@@ -93,8 +93,8 @@ CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 100
 RETRIEVER_K = 6  # con varios PDFs en la colección, 4 se queda corto
 
-MAX_TOKENS_RESPUESTA = 600
-CONTEXTO_LLM = 2048
+MAX_TOKENS_RESPUESTA = 2048  # Aumentado para evitar respuestas truncadas
+CONTEXTO_LLM = 4096         # Contexto ampliado para respuestas largas
 
 # Si el promedio de caracteres de texto extraído por página es menor a esto,
 # se asume que el PDF (o esa zona) está escaneado y se manda a OCR.
@@ -291,15 +291,21 @@ def construir_chain():
 
     retriever = vector_db.as_retriever(search_kwargs={"k": RETRIEVER_K})
 
-    template = """Responde a la pregunta basándote SOLO en el siguiente contexto.
-Si el contexto no tiene la respuesta, dilo claramente, no inventes.
-Al final, menciona de qué archivo(s) sacaste la información (metadata 'source').
+    template = """Eres un asistente experto que responde ÚNICAMENTE con la información del contexto proporcionado.
 
-Contexto:
+REGLAS ESTRICTAS:
+1. Usa SOLO la información del contexto. NO uses conocimiento externo.
+2. Si la pregunta no tiene respuesta en el contexto, responde exactamente: "No encontré información sobre ese tema en los documentos indexados."
+3. NO mezcles información de diferentes documentos a menos que la pregunta lo pida explícitamente.
+4. Si la pregunta es específica sobre un tema, busca SOLO en los chunks que hablan de ese tema.
+5. Al final, indica siempre de qué archivo(s) obtuviste la información.
+
+Contexto (chunks recuperados de los documentos):
 {context}
 
 Pregunta: {question}
-"""
+
+Respuesta completa y detallada:"""
     prompt = ChatPromptTemplate.from_template(template)
 
     def formatear_contexto(docs):
@@ -351,6 +357,23 @@ def preguntar(chain, question: str, retriever):
             "o si el modelo sigue en modo thinking.")
     else:
         log(f"\n[Completado en {duracion:.2f}s]")
+
+
+def preguntar_stream(chain, question: str, retriever):
+    docs_recuperados = retriever.invoke(question)
+    
+    fuentes = []
+    for d in docs_recuperados:
+        fuente = d.metadata.get("source", "?")
+        pagina = d.metadata.get("page", "?")
+        fuentes.append({"source": fuente, "page": pagina})
+        
+    yield f"data: {json.dumps({'type': 'sources', 'data': fuentes})}\n\n"
+
+    for pedazo in chain.stream(question):
+        yield f"data: {json.dumps({'type': 'chunk', 'data': pedazo})}\n\n"
+        
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
 # ============================================================

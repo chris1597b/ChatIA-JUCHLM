@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>RAG IA - JUCHLM</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-error-container": "#93000a",
+                    "tertiary-fixed-dim": "#fabd00",
+                    "surface-variant": "#e1e3e4",
+                    "surface-container": "#edeeef",
+                    "surface-bright": "#f8f9fa",
+                    "on-primary-container": "#bbd0ff",
+                    "surface-container-lowest": "#ffffff",
+                    "on-error": "#ffffff",
+                    "on-tertiary-fixed": "#261a00",
+                    "on-tertiary": "#ffffff",
+                    "surface-container-low": "#f3f4f5",
+                    "secondary-fixed": "#83fc8e",
+                    "primary": "#003f87",
+                    "primary-container": "#0056b3",
+                    "on-tertiary-fixed-variant": "#5b4300",
+                    "on-secondary-fixed-variant": "#00531a",
+                    "outline-variant": "#c2c6d4",
+                    "tertiary-container": "#725400",
+                    "on-primary": "#ffffff",
+                    "on-surface-variant": "#424752",
+                    "primary-fixed-dim": "#acc7ff",
+                    "surface-tint": "#115cb9",
+                    "on-secondary-fixed": "#002106",
+                    "outline": "#727784",
+                    "on-tertiary-container": "#ffc842",
+                    "secondary-fixed-dim": "#66df75",
+                    "on-secondary": "#ffffff",
+                    "surface-container-high": "#e7e8e9",
+                    "primary-fixed": "#d7e2ff",
+                    "on-primary-fixed-variant": "#004491",
+                    "error": "#ba1a1a",
+                    "inverse-on-surface": "#f0f1f2",
+                    "surface-container-highest": "#e1e3e4",
+                    "on-background": "#191c1d",
+                    "tertiary-fixed": "#ffdf9e",
+                    "on-surface": "#191c1d",
+                    "inverse-surface": "#2e3132",
+                    "surface-dim": "#d9dadb",
+                    "error-container": "#ffdad6",
+                    "on-secondary-container": "#007327",
+                    "inverse-primary": "#acc7ff",
+                    "surface": "#f8f9fa",
+                    "secondary": "#006e25",
+                    "secondary-container": "#80f98b",
+                    "on-primary-fixed": "#001a40",
+                    "tertiary": "#553e00",
+                    "background": "#f8f9fa"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "xl": "32px",
+                    "lg": "24px",
+                    "xs": "4px",
+                    "sm": "8px",
+                    "container-max": "1200px",
+                    "unit": "4px",
+                    "gutter": "20px",
+                    "md": "16px"
+            },
+            "fontFamily": {
+                    "body-sm": [
+                            "Inter"
+                    ],
+                    "label-md": [
+                            "Inter"
+                    ],
+                    "headline-lg-mobile": [
+                            "Inter"
+                    ],
+                    "body-md": [
+                            "Inter"
+                    ],
+                    "display-lg": [
+                            "Inter"
+                    ],
+                    "mono-sm": [
+                            "jetbrainsMono"
+                    ],
+                    "headline-lg": [
+                            "Inter"
+                    ]
+            }
+        },
+      }
+    }
+</script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .surface-glass {
+            background: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+        
+        .loader-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #c2c6d4;
+            position: relative;
+        }
+        .loader-dot.active {
+            background-color: #003f87;
+            box-shadow: 0 0 8px rgba(0, 63, 135, 0.4);
+            animation: pulse-dot 1.5s infinite;
+        }
+        .loader-dot.completed {
+            background-color: #003f87;
+        }
+        .loader-line {
+            width: 2px;
+            height: 16px;
+            background-color: #c2c6d4;
+            margin-left: 3px;
+        }
+        
+        @keyframes pulse-dot {
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(0, 63, 135, 0.4); }
+            50% { transform: scale(1.2); box-shadow: 0 0 0 4px rgba(0, 63, 135, 0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(0, 63, 135, 0); }
+        }
+
+        .scroll-smooth::-webkit-scrollbar {
+            width: 6px;
+        }
+        .scroll-smooth::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .scroll-smooth::-webkit-scrollbar-thumb {
+            background-color: #e1e3e4;
+            border-radius: 10px;
+        }
+        
+        /* Highlight Markdown styles */
+        .ai-response-content p { margin-bottom: 8px; }
+        .ai-response-content ul { list-style-type: disc; margin-left: 20px; margin-bottom: 8px; }
+        .ai-response-content ol { list-style-type: decimal; margin-left: 20px; margin-bottom: 8px; }
+        .ai-response-content li { margin-bottom: 4px; }
+        .ai-response-content strong { font-weight: bold; }
+        .ai-response-content h1, .ai-response-content h2, .ai-response-content h3, .ai-response-content h4 { font-weight: bold; margin-top: 12px; margin-bottom: 6px; }
+        .ai-response-content h1 { font-size: 1.25rem; }
+        .ai-response-content h2 { font-size: 1.15rem; }
+        .ai-response-content h3 { font-size: 1.1rem; }
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body-md antialiased overflow-hidden flex h-screen">
+<!-- SideNavBar -->
+<nav class="hidden md:flex flex-col fixed left-0 top-0 h-full py-lg bg-surface-container-low dark:bg-surface-container-lowest border-r border-outline-variant/20 docked w-[280px] z-40">
+<div class="px-lg mb-xl flex items-center gap-sm">
+<div class="w-10 h-10 rounded-lg bg-primary-container flex items-center justify-center text-on-primary-container font-headline-lg font-bold">
+                R
+            </div>
+<div>
+<h1 class="font-headline-lg text-headline-lg font-extrabold text-primary dark:text-primary-fixed-dim">JUCHLM</h1>
+<p class="font-label-md text-label-md text-on-surface-variant">RAG de IA local</p>
+</div>
+</div>
+<div class="px-md mb-lg">
+<a href="/documentos" class="w-full flex items-center justify-center gap-sm py-sm px-md rounded-lg bg-primary text-on-primary font-label-md text-label-md hover:bg-primary-container transition-colors shadow-sm">
+<span class="material-symbols-outlined text-[18px]">upload_file</span>
+                Subir PDF
+            </a>
+</div>
+<div class="flex-1 overflow-y-auto px-md flex flex-col gap-xs scroll-smooth">
+<a class="flex items-center gap-sm bg-primary-fixed dark:bg-on-primary-fixed-variant text-on-primary-fixed dark:text-primary-fixed border-l-4 border-primary dark:border-primary-fixed-dim px-md py-sm rounded-r-lg group translate-x-1 duration-200" href="/">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">add_comment</span>
+<span class="font-body-sm text-body-sm font-semibold">Nuevo Chat</span>
+</a>
+<a class="flex items-center gap-sm text-on-surface-variant dark:text-surface-variant px-md py-sm rounded-lg hover:bg-surface-container-high dark:hover:bg-surface-container-highest transition-all group" href="#">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">history</span>
+<span class="font-body-sm text-body-sm">Historial</span>
+</a>
+<a class="flex items-center gap-sm text-on-surface-variant dark:text-surface-variant px-md py-sm rounded-lg hover:bg-surface-container-high dark:hover:bg-surface-container-highest transition-all group" href="/documentos">
+<span class="material-symbols-outlined text-[20px] group-hover:text-primary">description</span>
+<span class="font-body-sm text-body-sm">Documentos</span>
+</a>
+
+<div class="mt-lg pt-md border-t border-outline-variant/20">
+<h3 class="font-label-md text-label-md text-outline mb-sm px-md uppercase tracking-wider">Documentos Recientes</h3>
+<div id="sidebar-docs-list">
+    <!-- Cargar por JS -->
+</div>
+</div>
+</div>
+<div class="mt-auto px-md pt-md border-t border-outline-variant/20 flex flex-col gap-xs">
+<a class="flex items-center gap-sm text-on-surface-variant dark:text-surface-variant px-md py-sm rounded-lg hover:bg-surface-container-high dark:hover:bg-surface-container-highest transition-all" href="#">
+<span class="material-symbols-outlined text-[20px]">settings</span>
+<span class="font-body-sm text-body-sm">Configuración</span>
+</a>
+</div>
+</nav>
+
+<!-- Main Content Area -->
+<main class="flex-1 flex flex-col md:ml-[280px] h-full relative w-full bg-background">
+<header class="fixed top-0 left-0 md:left-[280px] w-full md:w-[calc(100%-280px)] z-50 flex justify-between items-center px-lg h-16 bg-surface/80 dark:bg-surface-dim/80 border-b border-outline-variant/30 backdrop-blur-md shadow-sm">
+<div class="flex items-center gap-sm md:hidden">
+<button class="text-on-surface-variant hover:bg-surface-container transition-colors p-sm rounded-full">
+<span class="material-symbols-outlined">menu</span>
+</button>
+<span class="font-headline-lg-mobile text-headline-lg-mobile font-bold text-primary dark:text-primary-fixed-dim">ChatJUCHLM</span>
+</div>
+<div class="hidden md:block">
+<span class="font-headline-lg-mobile text-headline-lg-mobile font-bold text-primary dark:text-primary-fixed-dim">ChatJUCHLM</span>
+</div>
+<div class="flex items-center gap-sm">
+<button class="text-on-surface-variant hover:bg-surface-container p-sm rounded-full transition-colors active:scale-95 duration-150">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<div class="w-8 h-8 rounded-full bg-primary-fixed border border-outline-variant overflow-hidden ml-sm">
+</div>
+</div>
+</header>
+
+<!-- Chat Canvas -->
+<div class="flex-1 overflow-y-auto pt-24 px-md md:px-lg flex justify-center scroll-smooth" id="chat-canvas">
+<div class="w-full max-w-[800px] flex flex-col gap-lg pb-[240px]" id="chat-messages">
+    <!-- Welcome message -->
+    <div class="flex justify-start">
+        <div class="surface-glass text-on-surface rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border border-[#e9ecef] shadow-[0_4px_20px_rgba(0,0,0,0.04)]">
+        <p class="font-body-md text-body-md">¡Hola! Soy ChatJUCHLM, tu asistente AI. Hazme preguntas sobre los documentos PDF indexados.</p>
+        </div>
+    </div>
+</div>
+</div>
+
+<!-- Input Area -->
+<div class="absolute bottom-0 left-0 w-full bg-gradient-to-t from-surface via-surface to-transparent pt-xl pb-lg px-md md:px-lg flex justify-center z-30 pointer-events-none">
+<div class="w-full max-w-[800px] pointer-events-auto">
+<div class="bg-surface-container-lowest border border-outline-variant/40 rounded-2xl shadow-[0_12px_40px_rgba(0,86,179,0.08)] p-sm flex items-end gap-sm transition-all focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-surface">
+<button class="p-sm text-outline hover:text-primary transition-colors rounded-full hover:bg-surface-container flex-shrink-0" title="Subir documento" onclick="window.location.href='/documentos'">
+<span class="material-symbols-outlined">add</span>
+</button>
+<div class="flex-1 min-h-[44px] max-h-[120px] overflow-y-auto">
+<textarea id="chat-input" class="w-full bg-transparent border-none focus:ring-0 resize-none font-body-md text-body-md text-on-surface placeholder:text-outline py-2 outline-none" placeholder="Haz una pregunta sobre tus documentos..." rows="1"></textarea>
+</div>
+<button id="send-btn" class="p-sm bg-primary-container text-on-primary-container rounded-xl hover:bg-primary hover:text-on-primary transition-colors flex-shrink-0">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">send</span>
+</button>
+</div>
+<div class="text-center mt-xs">
+<span class="font-label-md text-label-md text-outline font-normal text-[10px]">RAG Intelligence puede cometer errores. Verifica la información.</span>
+</div>
+</div>
+</div>
+</main>
+
+<script>
+    // Utils
+    function scrollToBottom() {
+        const canvas = document.getElementById('chat-canvas');
+        canvas.scrollTop = canvas.scrollHeight;
+    }
+
+    const textarea = document.getElementById('chat-input');
+    textarea.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = (this.scrollHeight) + 'px';
+        if(this.value === '') {
+            this.style.height = 'auto';
+        }
+    });
+
+    textarea.addEventListener('keydown', function(e) {
+        if(e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    document.getElementById('send-btn').addEventListener('click', sendMessage);
+
+    async function sendMessage() {
+        const text = textarea.value.trim();
+        if (!text) return;
+
+        textarea.value = '';
+        textarea.style.height = 'auto';
+
+        const chatMessages = document.getElementById('chat-messages');
+
+        // Add user message
+        const userMsg = document.createElement('div');
+        userMsg.className = 'flex justify-end';
+        userMsg.innerHTML = `
+            <div class="bg-primary text-on-primary rounded-2xl rounded-tr-sm px-md py-sm max-w-[85%] shadow-[0_4px_20px_rgba(0,0,0,0.04)]">
+            <p class="font-body-md text-body-md">${escapeHtml(text).replace(/\n/g, '<br>')}</p>
+            </div>
+        `;
+        chatMessages.appendChild(userMsg);
+        scrollToBottom();
+
+        // Add AI placeholder with loader
+        const aiMsgWrapper = document.createElement('div');
+        aiMsgWrapper.className = 'flex justify-start';
+        
+        // loader html
+        aiMsgWrapper.innerHTML = `
+            <div class="flex gap-md w-full max-w-[85%] ai-loader">
+                <div class="flex flex-col items-center pt-2">
+                    <div class="loader-dot active"></div>
+                </div>
+                <div class="flex flex-col gap-2 pt-1">
+                    <div class="font-label-md text-label-md text-primary font-semibold flex items-center gap-xs">
+                        <span class="material-symbols-outlined text-[14px] animate-spin">sync</span>
+                        Buscando y generando respuesta...
+                    </div>
+                </div>
+            </div>
+            
+            <div class="surface-glass text-on-surface rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border border-[#e9ecef] shadow-[0_4px_20px_rgba(0,0,0,0.04)] ai-content-box hidden mb-40">
+                <div class="font-body-md text-body-md mb-sm ai-response-content"></div>
+                <div class="ai-sources mt-3 flex flex-wrap gap-2"></div>
+            </div>
+        `;
+        chatMessages.appendChild(aiMsgWrapper);
+        scrollToBottom();
+
+        const loader = aiMsgWrapper.querySelector('.ai-loader');
+        const contentBox = aiMsgWrapper.querySelector('.ai-content-box');
+        const contentDiv = aiMsgWrapper.querySelector('.ai-response-content');
+        const sourcesDiv = aiMsgWrapper.querySelector('.ai-sources');
+
+        try {
+            const response = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: text })
+            });
+
+            if (!response.ok) throw new Error('Error en red');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let firstChunkReceived = false;
+            let rawAiResponse = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunkText = decoder.decode(value, {stream: true});
+                const lines = chunkText.split('\n');
+
+                for (let line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const dataStr = line.substring(6);
+                        try {
+                            const payload = JSON.parse(dataStr);
+                            
+                            if (!firstChunkReceived) {
+                                firstChunkReceived = true;
+                                loader.classList.add('hidden');
+                                contentBox.classList.remove('hidden');
+                            }
+
+                            if (payload.type === 'sources') {
+                                const sources = payload.data;
+                                // Deduplicate sources
+                                const uniqueSources = [...new Set(sources.map(s => s.source))];
+                                if(uniqueSources.length > 0) {
+                                    uniqueSources.forEach(src => {
+                                        if(src === '?') return;
+                                        sourcesDiv.innerHTML += `
+                                            <div class="inline-flex items-center gap-xs bg-[#ffc107]/10 text-on-surface-variant px-sm py-1 rounded-md border border-outline-variant/30 hover:bg-[#ffc107]/20 transition-colors cursor-pointer">
+                                                <span class="material-symbols-outlined text-[14px] text-tertiary-container">picture_as_pdf</span>
+                                                <span class="font-mono-sm text-mono-sm">${escapeHtml(src)}</span>
+                                            </div>
+                                        `;
+                                    });
+                                }
+                            } else if (payload.type === 'chunk') {
+                                rawAiResponse += payload.data;
+                                contentDiv.innerHTML = marked.parse(rawAiResponse);
+                                scrollToBottom();
+                            } else if (payload.type === 'done') {
+                                // finished
+                                scrollToBottom();
+                            }
+                        } catch (e) {
+                            console.error("Error parsing JSON line", e, dataStr);
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(error);
+            loader.innerHTML = `<span class="text-error">Error al conectar con el servidor.</span>`;
+        }
+    }
+
+    function escapeHtml(unsafe) {
+        return (unsafe||"").toString()
+             .replace(/&/g, "&amp;")
+             .replace(/</g, "&lt;")
+             .replace(/>/g, "&gt;")
+             .replace(/"/g, "&quot;")
+             .replace(/'/g, "&#039;");
+    }
+
+    // Load recent documents
+    async function loadRecentDocs() {
+        try {
+            const res = await fetch('/api/documents');
+            const data = await res.json();
+            const sidebar = document.getElementById('sidebar-docs-list');
+            if(data.documents && data.documents.length > 0) {
+                sidebar.innerHTML = data.documents.slice(0,5).map(doc => `
+                    <a class="flex items-center gap-sm text-on-surface-variant px-md py-sm rounded-lg hover:bg-surface-container-high transition-all truncate" href="/documentos">
+                        <span class="material-symbols-outlined text-[16px] text-primary">picture_as_pdf</span>
+                        <span class="font-body-sm text-body-sm truncate" title="${escapeHtml(doc.name)}">${escapeHtml(doc.name)}</span>
+                    </a>
+                `).join('');
+            } else {
+                sidebar.innerHTML = `<p class="px-md text-sm text-outline">Sin documentos</p>`;
+            }
+        } catch(e) {}
+    }
+    
+    loadRecentDocs();
+</script>
+</body></html>
