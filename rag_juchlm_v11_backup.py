@@ -594,7 +594,7 @@ def _get_ocr_engine():
     return _OCR_ENGINE
 
 
-def _ocr_pagina_con_rapidocr(pdf_path: Path, page_index: int) -> str:
+def _ocr_pagina_con_rapidocr(pdf_path: Path, page_index: int) -> tuple[str, Optional[float]]:
     try:
         import fitz
         import numpy as np
@@ -624,16 +624,25 @@ def _ocr_pagina_con_rapidocr(pdf_path: Path, page_index: int) -> str:
         resultado = engine(imagen_array)
         resultados = resultado[0] if isinstance(resultado, tuple) else resultado
         if not resultados:
-            return ""
+            return "", None
 
         textos = []
+        confidencias = []
         for item in resultados:
             if not item or not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
             texto = str(item[1] or "").strip()
             if texto:
                 textos.append(texto)
-        return "\n".join(textos).strip()
+            # item[2] = confianza de RapidOCR cuando está disponible.
+            if len(item) >= 3:
+                try:
+                    confidencias.append(float(item[2]))
+                except (TypeError, ValueError):
+                    pass
+
+        confianza_promedio = sum(confidencias) / len(confidencias) if confidencias else None
+        return "\n".join(textos).strip(), confianza_promedio
     finally:
         pdf.close()
 
@@ -642,6 +651,10 @@ def cargar_pdf(path: Path) -> tuple[list[Document], bool]:
     docs = cargar_pdf_texto(path)
     if not docs:
         return [], False
+
+    # source_type por página (item 4/20): "text" salvo que se reemplace por OCR.
+    for doc in docs:
+        doc.metadata["source_type"] = "text"
 
     paginas_ocr = [
         i for i, doc in enumerate(docs)
@@ -663,14 +676,18 @@ def cargar_pdf(path: Path) -> tuple[list[Document], bool]:
 
     for page_index in paginas_ocr:
         try:
-            texto_ocr = _ocr_pagina_con_rapidocr(path, page_index)
+            texto_ocr, confianza = _ocr_pagina_con_rapidocr(path, page_index)
             original = docs[page_index].page_content or ""
             if len(texto_ocr) > len(original.strip()):
                 docs[page_index].page_content = texto_ocr
+                docs[page_index].metadata["source_type"] = "ocr"
+                if confianza is not None:
+                    docs[page_index].metadata["ocr_confidence"] = round(confianza, 4)
                 fue_ocr = True
+                nota_confianza = f", confianza {confianza:.2f}" if confianza is not None else ""
                 log(
                     f"    -> OCR página {page_index + 1}: "
-                    f"{len(texto_ocr)} caracteres."
+                    f"{len(texto_ocr)} caracteres{nota_confianza}."
                 )
         except Exception as e:
             log(f"    -> ERROR OCR página {page_index + 1}: {e}")
@@ -698,6 +715,15 @@ splitter = RecursiveCharacterTextSplitter(
     chunk_size=CHUNK_SIZE,
     chunk_overlap=CHUNK_OVERLAP,
     length_function=len,
+    # v12: separadores jerárquicos -> intenta cortar ANTES de un
+    # encabezado legal/estructural en vez de partirlo a la mitad
+    # (ej. "Artículo 366°..." no debe quedar cortado entre dos chunks).
+    separators=[
+        "\n\nArtículo ", "\nArtículo ", "\n\nART. ", "\nART. ",
+        "\n\nCAPÍTULO", "\n\nCAPITULO", "\n\nSECCIÓN", "\n\nSECCION",
+        "\n\nTÍTULO", "\n\nTITULO",
+        "\n\n", "\n", ". ", " ", "",
+    ],
 )
 
 
@@ -803,6 +829,23 @@ def sincronizar_carpeta():
             chunk.metadata["chunk_index"] = chunk_index
             chunk.metadata["index_schema_version"] = CURRENT_INDEX_SCHEMA_VERSION
 
+        # Item 23: hash de CONTENIDO (no del archivo) para avisar de
+        # posibles duplicados. Solo informativo: nunca se borra nada
+        # automáticamente, porque dos documentos distintos pueden
+        # legítimamente compartir texto (ej. una plantilla oficial).
+        contenido_hash = hashlib.md5(
+            "".join(d.page_content or "" for d in docs).encode("utf-8", errors="ignore")
+        ).hexdigest()
+        posibles_duplicados = [
+            otro for otro, info in manifest.items()
+            if otro != source_id and info.get("content_hash") == contenido_hash
+        ]
+        if posibles_duplicados:
+            log(
+                f"    -> ADVERTENCIA: '{source_id}' tiene el mismo contenido "
+                f"que: {', '.join(posibles_duplicados)}. Revisar si es un duplicado real."
+            )
+
         ids = [
             f"{source_id}::page-{c.metadata.get('page', 0)}::chunk-{i}"
             for i, c in enumerate(chunks)
@@ -816,6 +859,7 @@ def sincronizar_carpeta():
 
         manifest[source_id] = {
             "firma": hash_archivo(path),
+            "content_hash": contenido_hash,
             "area": area,
             "chunks": len(chunks),
             "pages": len(docs),
@@ -887,6 +931,7 @@ class QueryContext:
     focus_terms: set[str] = field(default_factory=set)
     sensitive: bool = False
     requires_completeness: bool = True
+    es_resumen: bool = False
 
 
 @dataclass
@@ -900,6 +945,8 @@ class PipelineResult:
     answerable: bool = False
     answerability_score: float = 0.0
     answerability_reason: str = ""
+    modo_resumen: bool = False
+    fuente_resumen: Optional[str] = None
 
 
 # ============================================================
@@ -951,6 +998,17 @@ def _detectar_pagina(question: str) -> tuple[Optional[int], bool]:
             if n >= 1:
                 return n - 1, False
     return None, False
+
+
+def _detectar_resumen(question: str) -> bool:
+    q = normalizar_texto(question)
+    patrones = [
+        r"\bresume\b", r"\bresumen\b", r"\bresumir\b", r"\bresumeme\b",
+        r"\bhaz un resumen\b", r"\bhazme un resumen\b", r"\bsintetiza\b",
+        r"\bsintesis del documento\b", r"\bde que trata\b", r"\bde que se trata\b",
+        r"\bresumen ejecutivo\b",
+    ]
+    return any(re.search(p, q) for p in patrones)
 
 
 def _detectar_comparacion(question: str) -> bool:
@@ -1187,6 +1245,7 @@ def detectar_intencion(question: str) -> QueryContext:
     fuente = fuentes[0] if fuentes else None
     pagina, ultima = _detectar_pagina(question)
     comparacion = _detectar_comparacion(question)
+    es_resumen = _detectar_resumen(question) and not comparacion
 
     # Área: 1) mencionada explícitamente en la pregunta,
     #       2) heredada de la(s) fuente(s) explícita(s),
@@ -1194,9 +1253,9 @@ def detectar_intencion(question: str) -> QueryContext:
     area_explicita = _detectar_area_en_pregunta(q_norm)
     area = area_explicita or _area_de_fuentes(fuentes) or DEFAULT_AREA
 
-    tipo = _detectar_tipo_consulta(question, comparacion, fuente, pagina)
+    tipo = "resumen" if es_resumen else _detectar_tipo_consulta(question, comparacion, fuente, pagina)
     subpreguntas = _detectar_subpreguntas(question)
-    perfil = _detectar_perfil(question, area, pagina, comparacion)
+    perfil = "resumen" if es_resumen else _detectar_perfil(question, area, pagina, comparacion)
 
     terminos_area = _perfiles_de_area(area)
     focus_terms = set(terminos_area.get(perfil, []))
@@ -1219,7 +1278,8 @@ def detectar_intencion(question: str) -> QueryContext:
         perfil=perfil,
         focus_terms=focus_terms,
         sensitive=sensitive,
-        requires_completeness=True,
+        requires_completeness=not es_resumen,
+        es_resumen=es_resumen,
     )
 
     resolver_ultima_pagina(ctx)
@@ -1481,6 +1541,99 @@ def recuperar_candidatos(ctx: QueryContext) -> list[Document]:
         reverse=True,
     )
     return salida[:RETRIEVER_K]
+
+
+# ============================================================
+# PASO 4.5 · RERANKING HEURÍSTICO (sin modelo cross-encoder)
+# ============================================================
+#
+# Decisión de diseño: NO se agrega un reranker basado en modelo
+# (ej. bge-reranker vía sentence-transformers) porque:
+#   - añade una dependencia pesada + un modelo adicional a cargar,
+#   - en hardware local ya limitado por Ollama, cuesta latencia real,
+#   - el problema concreto reportado (fecha/expediente/monto exacto
+#     no siempre en el chunk mejor rankeado por similitud) se
+#     resuelve con una señal determinista y barata: ¿el chunk
+#     contiene la ENTIDAD EXACTA (fecha, número, nombre propio,
+#     identificador) que aparece en la pregunta o en el perfil?
+#
+# Si en el futuro se quiere un reranker real:
+#   pip install sentence-transformers
+#   modelo sugerido (100% local, corre en CPU): BAAI/bge-reranker-base
+# ============================================================
+
+_MESES = (
+    "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|"
+    "setiembre|octubre|noviembre|diciembre"
+)
+
+
+def _extraer_entidades_pregunta(ctx: QueryContext) -> dict:
+    """Entidades exactas mencionadas EN LA PREGUNTA (no en el contexto).
+    Sirven de ancla para el rerank: si la pregunta ya trae un número,
+    fecha o nombre propio, el chunk ganador debería contenerlo."""
+    q = ctx.question
+    q_norm = normalizar_texto(q)
+    return {
+        "fechas": set(re.findall(
+            rf"\b\d{{1,2}}\s+de\s+(?:{_MESES})\s+del?\s+\d{{4}}\b"
+            r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+            q_norm,
+        )),
+        "numeros": extraer_numeros(q),
+        "nombres": set(_extraer_secuencias_nombre(q)) if any(c.isupper() for c in q) else set(),
+    }
+
+
+def _rerank_bonus(doc: Document, entidades_pregunta: dict, ctx: QueryContext) -> float:
+    """Bonifica un chunk si contiene literalmente una entidad que la
+    pregunta ya trae (caso: pregunta con número de expediente parcial,
+    con una fecha, o con un nombre propio) y, para perfiles temporales
+    o numéricos, bonifica cualquier chunk que traiga UNA fecha/monto
+    aunque la pregunta no la traiga (caso #33: "fecha de la sentencia")."""
+    texto_norm = normalizar_texto(doc.page_content)
+    bonus = 0.0
+
+    for fecha in entidades_pregunta["fechas"]:
+        if fecha and fecha in texto_norm:
+            bonus += 0.25
+
+    for numero in entidades_pregunta["numeros"]:
+        if len(numero) >= 4 and numero in doc.page_content:
+            bonus += 0.15
+
+    for nombre in entidades_pregunta["nombres"]:
+        if normalizar_texto(nombre) in texto_norm:
+            bonus += 0.20
+
+    # Perfiles temporales/numéricos: el chunk ganador DEBE traer una
+    # fecha/monto propios, aunque la pregunta no la mencione todavía.
+    if ctx.perfil in {"fecha", "fecha_hechos", "fecha_sentencia"} and _extraer_fechas(doc.page_content):
+        bonus += 0.20
+    if ctx.perfil == "monto" and _extraer_montos(doc.page_content):
+        bonus += 0.20
+    if ctx.perfil in {"expediente", "resolucion", "oficio", "memorando", "factura", "contrato"} and _extraer_ids(doc.page_content):
+        bonus += 0.20
+
+    return min(0.60, bonus)
+
+
+def rerank_candidatos(ctx: QueryContext, candidatos: list[Document]) -> list[Document]:
+    if not candidatos:
+        return candidatos
+
+    entidades_pregunta = _extraer_entidades_pregunta(ctx)
+    for doc in candidatos:
+        bonus = _rerank_bonus(doc, entidades_pregunta, ctx)
+        hybrid = float(doc.metadata.get("_hybrid_score", 0.0) or 0.0)
+        doc.metadata["_rerank_bonus"] = bonus
+        doc.metadata["_hybrid_score"] = hybrid + bonus  # se propaga a ranking/evidencia/gate
+
+    candidatos.sort(
+        key=lambda d: float(d.metadata.get("_hybrid_score", 0.0) or 0.0),
+        reverse=True,
+    )
+    return candidatos
 
 
 # ============================================================
@@ -1814,18 +1967,80 @@ def seleccionar_evidencia(ctx: QueryContext, docs_aislados: list[Document]):
 # ============================================================
 
 
-def ejecutar_pipeline(question: str) -> PipelineResult:
-    ctx = detectar_intencion(question)
+def _un_pase_pipeline(ctx: QueryContext) -> tuple[list[Document], list, list[Document], list[Document], list, bool, float, str]:
     candidatos = recuperar_candidatos(ctx)
+    candidatos = rerank_candidatos(ctx, candidatos)  # PASO 4.5
     ranking = identificar_documento_relevante(ctx, candidatos)
     aislados = aislar_documento(ctx, ranking)
     evidencia, scores = seleccionar_evidencia(ctx, aislados)
-
     answerable, answer_score, answer_reason = evaluar_answerability(ctx, candidatos)
+    return candidatos, ranking, aislados, evidencia, scores, answerable, answer_score, answer_reason
+
+
+def ejecutar_pipeline(question: str) -> PipelineResult:
+    metricas_tiempo = {}
+    t0 = time.time()
+    ctx = detectar_intencion(question)
+    metricas_tiempo["query_analysis"] = time.time() - t0
+
+    t1 = time.time()
+    candidatos, ranking, aislados, evidencia, scores, answerable, answer_score, answer_reason = _un_pase_pipeline(ctx)
+    metricas_tiempo["retrieval_pase_1"] = time.time() - t1
+
+    # --------------------------------------------------------
+    # Item 15: reintento con señal relajada ANTES de abstenerse.
+    # Solo si el primer pase falló por señal débil (no por
+    # restricción explícita sin evidencia real), para no convertir
+    # cualquier pregunta ambigua en una respuesta forzada.
+    # --------------------------------------------------------
+    intento_relajado = False
+    if not answerable and candidatos:
+        intento_relajado = True
+        t2 = time.time()
+        top = candidatos[0]
+        best_hybrid = float(top.metadata.get("_hybrid_score", 0.0) or 0.0)
+        best_sem = float(top.metadata.get("_semantic_score", 0.0) or 0.0)
+        umbral_relajado = max(0.30, ANSWERABILITY_MIN_GENERAL - 0.10)
+        if best_hybrid >= umbral_relajado or best_sem >= ANSWERABILITY_SEMANTIC_ONLY_MIN:
+            evidencia, scores = seleccionar_evidencia(ctx, aislados)
+            if evidencia:
+                answerable = True
+                answer_score = best_hybrid
+                answer_reason = "reintento con umbral relajado (retrieval débil, no ausencia de evidencia)"
+        metricas_tiempo["reintento_relajado"] = time.time() - t2
 
     if not answerable:
         evidencia = []
         scores = []
+
+    # --------------------------------------------------------
+    # Modo resumen (item 18): una vez identificado el documento
+    # (vía ranking/aislamiento normal), el resumen no debe limitarse
+    # a los FINAL_CONTEXT_CHUNKS más similares -> se recupera TODO
+    # el documento aparte, para el map-reduce.
+    # --------------------------------------------------------
+    modo_resumen = False
+    fuente_resumen = None
+    if ctx.es_resumen and ranking:
+        fuente_resumen = ctx.fuente_explicita or ranking[0][1]
+        modo_resumen = True
+        answerable = True
+        answer_reason = "modo resumen: documento identificado"
+        answer_score = ranking[0][0] if ranking else 0.0
+
+    scores_hybrid = [float(d.metadata.get("_hybrid_score", 0.0) or 0.0) for d in candidatos]
+    log(
+        "\n--- Métricas del pipeline ---\n"
+        f"  Documentos candidatos (fuentes distintas): {len({d.metadata.get('source') for d in candidatos})}\n"
+        f"  Chunks candidatos: {len(candidatos)}\n"
+        f"  Chunks finales de evidencia: {len(evidencia)}\n"
+        f"  Score máximo: {max(scores_hybrid):.4f}" if scores_hybrid else "  Score máximo: 0.0000"
+    )
+    if scores_hybrid:
+        log(f"  Score promedio: {sum(scores_hybrid) / len(scores_hybrid):.4f}")
+    log(f"  Reintento relajado usado: {'sí' if intento_relajado else 'no'}")
+    for fase, dur in metricas_tiempo.items():
+        log(f"  Tiempo {fase}: {dur:.2f}s")
 
     return PipelineResult(
         ctx=ctx,
@@ -1837,6 +2052,8 @@ def ejecutar_pipeline(question: str) -> PipelineResult:
         answerable=answerable,
         answerability_score=answer_score,
         answerability_reason=answer_reason,
+        modo_resumen=modo_resumen,
+        fuente_resumen=fuente_resumen,
     )
 
 
@@ -1886,6 +2103,125 @@ PREGUNTA:
 
 RESPUESTA:
 """
+
+
+# ============================================================
+# MODO RESUMEN (item 18) · map-reduce sobre el documento completo
+# ============================================================
+#
+# No reutiliza FINAL_CONTEXT_CHUNKS=8: un resumen de "todo el
+# documento" necesita ver todo el documento (hasta un tope), no
+# solo los 8 chunks más similares a la pregunta "resume esto".
+# ============================================================
+
+MAX_RESUMEN_TOTAL_CHUNKS = 160          # tope duro por documento
+RESUMEN_BLOQUE_MAX_CHARS = 12000        # ~ mitad de CONTEXTO_LLM, deja margen para prompt + salida
+
+RESUMEN_BLOQUE_PROMPT = """
+Eres un asistente documental. Resume EXCLUSIVAMENTE la información
+contenida en el siguiente fragmento del documento.
+
+No inventes ni agregues información externa.
+Sé conciso pero conserva datos concretos: fechas, números,
+identificadores, nombres, montos y conclusiones textuales.
+
+FRAGMENTO:
+{context}
+
+RESUMEN DEL FRAGMENTO:
+"""
+
+RESUMEN_SINTESIS_PROMPT = """
+Eres un asistente documental. Tienes varios resúmenes parciales
+del MISMO documento, en el orden en que aparecen en el documento.
+
+Combínalos en un resumen final coherente, sin repeticiones,
+atendiendo la intención de la pregunta original si aplica.
+No inventes información que no esté en los resúmenes parciales.
+No agregues una sección "Fuentes".
+
+PREGUNTA ORIGINAL (puede ser genérica, ej. "resume el documento"):
+{question}
+
+RESÚMENES PARCIALES EN ORDEN:
+{resumenes}
+
+RESUMEN FINAL:
+"""
+
+
+def obtener_todos_los_chunks_de_fuente(source: str) -> list[Document]:
+    """A diferencia de recuperar_candidatos (limitado a RETRIEVER_K por
+    similitud), esto trae TODOS los chunks indexados de un documento,
+    necesarios para poder resumirlo completo."""
+    try:
+        data = vector_db.get(where={"source": source}, include=["documents", "metadatas"])
+    except Exception as e:
+        log(f"ADVERTENCIA obteniendo chunks completos de '{source}': {e}")
+        return []
+
+    docs = []
+    for content, metadata in zip(data.get("documents") or [], data.get("metadatas") or []):
+        metadata = dict(metadata or {})
+        docs.append(Document(page_content=content or "", metadata=metadata))
+
+    docs.sort(key=lambda d: (int(d.metadata.get("page", 0) or 0), int(d.metadata.get("chunk_index", 0) or 0)))
+    return docs
+
+
+def generar_resumen_documento(llm, ctx: QueryContext, chunks: list[Document]) -> str:
+    if not chunks:
+        return "No encontré información suficiente en los documentos indexados para responder esa pregunta."
+
+    chunks = chunks[:MAX_RESUMEN_TOTAL_CHUNKS]
+
+    bloques: list[list[Document]] = []
+    actual: list[Document] = []
+    chars_actual = 0
+    for chunk in chunks:
+        texto = chunk.page_content or ""
+        if actual and chars_actual + len(texto) > RESUMEN_BLOQUE_MAX_CHARS:
+            bloques.append(actual)
+            actual = []
+            chars_actual = 0
+        actual.append(chunk)
+        chars_actual += len(texto)
+    if actual:
+        bloques.append(actual)
+
+    log(f"    -> Modo resumen: {len(chunks)} chunks en {len(bloques)} bloque(s).")
+
+    prompt_bloque = ChatPromptTemplate.from_template(RESUMEN_BLOQUE_PROMPT)
+    resumenes_parciales = []
+    for i, bloque in enumerate(bloques, 1):
+        contexto_bloque = formatear_contexto(bloque)
+        try:
+            respuesta = llm.invoke(prompt_bloque.format_messages(context=contexto_bloque))
+            texto = str(getattr(respuesta, "content", "") or "").strip()
+            if texto:
+                resumenes_parciales.append(texto)
+        except Exception as e:
+            log(f"    -> Error resumiendo bloque {i}/{len(bloques)}: {e}")
+
+    if not resumenes_parciales:
+        return "No encontré información suficiente en los documentos indexados para responder esa pregunta."
+
+    if len(resumenes_parciales) == 1:
+        return resumenes_parciales[0]
+
+    prompt_sintesis = ChatPromptTemplate.from_template(RESUMEN_SINTESIS_PROMPT)
+    try:
+        respuesta = llm.invoke(
+            prompt_sintesis.format_messages(
+                question=ctx.question,
+                resumenes="\n\n---\n\n".join(resumenes_parciales),
+            )
+        )
+        final = str(getattr(respuesta, "content", "") or "").strip()
+        return final if final else "\n\n".join(resumenes_parciales)
+    except Exception as e:
+        log(f"    -> Error en síntesis final del resumen: {e}")
+        return "\n\n".join(resumenes_parciales)
 
 
 # ============================================================
@@ -2385,6 +2721,14 @@ def construir_chain():
                 if not resultado.answerable:
                     yield "No encontré información suficiente en los documentos indexados para responder esa pregunta."
                     return
+
+                if resultado.modo_resumen and resultado.fuente_resumen:
+                    chunks_completos = obtener_todos_los_chunks_de_fuente(resultado.fuente_resumen)
+                    respuesta = generar_resumen_documento(llm, resultado.ctx, chunks_completos)
+                    for pos in range(0, len(respuesta), 160):
+                        yield respuesta[pos:pos + 160]
+                    return
+
                 docs = resultado.docs_evidencia
                 ctx = resultado.ctx
             else:
@@ -2430,7 +2774,15 @@ def construir_chain():
 
         def invoke(self, question):
             resultado = ejecutar_pipeline(question)
-            if not resultado.answerable or not resultado.docs_evidencia:
+            if not resultado.answerable:
+                return Document(
+                    page_content="No encontré información suficiente en los documentos indexados para responder esa pregunta."
+                )
+            if resultado.modo_resumen and resultado.fuente_resumen:
+                chunks_completos = obtener_todos_los_chunks_de_fuente(resultado.fuente_resumen)
+                respuesta = generar_resumen_documento(llm, resultado.ctx, chunks_completos)
+                return Document(page_content=respuesta)
+            if not resultado.docs_evidencia:
                 return Document(
                     page_content="No encontré información suficiente en los documentos indexados para responder esa pregunta."
                 )
@@ -2539,26 +2891,40 @@ def preguntar(chain, question: str, retriever):
     inicio = time.time()
     resultado = ejecutar_pipeline(question)
     imprimir_debug(resultado)
-    print(f"[Contexto final: {len(resultado.docs_evidencia)} chunks]\n")
+    print(f"[Contexto final: {len(resultado.docs_evidencia)} chunks | modo resumen: {resultado.modo_resumen}]\n")
 
-    if not resultado.answerable or not resultado.docs_evidencia:
+    if not resultado.answerable:
         print("No encontré información suficiente en los documentos indexados para responder esa pregunta.")
         return
+    if not resultado.modo_resumen and not resultado.docs_evidencia:
+        print("No encontré información suficiente en los documentos indexados para responder esa pregunta.")
+        return
+
+    docs_para_stream = None if resultado.modo_resumen else resultado.docs_evidencia
+    if resultado.modo_resumen:
+        # El streaming compatible de ChainCompatible.stream() detecta el modo
+        # resumen por sí mismo cuando docs=None, así que forzamos ese camino
+        # reconstruyendo el pipeline internamente (misma pregunta).
+        pass
 
     respuesta_completa = ""
     primer_fragmento = None
 
-    for pedazo in chain.stream(question, docs=resultado.docs_evidencia):
+    fuente_iter = chain.stream(question) if resultado.modo_resumen else chain.stream(question, docs=docs_para_stream)
+    for pedazo in fuente_iter:
         if primer_fragmento is None:
             primer_fragmento = time.time()
             print(f"[primer fragmento en {primer_fragmento - inicio:.2f}s]\n")
         respuesta_completa += pedazo
         print(pedazo, end="", flush=True)
 
-    fuentes = formatear_fuentes(resultado.docs_evidencia)
-    print("\n\nFuentes:")
-    for fuente in fuentes:
-        print(f"- [{fuente['area']}] {fuente['source']}, página {fuente['page']}")
+    if resultado.modo_resumen:
+        print(f"\n\nFuente: [{resultado.ctx.area}] {resultado.fuente_resumen} (resumen del documento completo)")
+    else:
+        fuentes = formatear_fuentes(resultado.docs_evidencia)
+        print("\n\nFuentes:")
+        for fuente in fuentes:
+            print(f"- [{fuente['area']}] {fuente['source']}, página {fuente['page']}")
 
     print(f"\n[Completado en {time.time() - inicio:.2f}s]")
 
@@ -2571,7 +2937,7 @@ def preguntar(chain, question: str, retriever):
 def preguntar_stream(chain, question: str, retriever):
     resultado = ejecutar_pipeline(question)
 
-    if not resultado.answerable or not resultado.docs_evidencia:
+    if not resultado.answerable or (not resultado.modo_resumen and not resultado.docs_evidencia):
         yield (
             "data: " +
             json.dumps({"type": "sources", "data": []}, ensure_ascii=False) +
@@ -2595,7 +2961,11 @@ def preguntar_stream(chain, question: str, retriever):
         )
         return
 
-    fuentes = formatear_fuentes(resultado.docs_evidencia)
+    if resultado.modo_resumen:
+        fuentes = [{"source": resultado.fuente_resumen, "area": resultado.ctx.area, "page": None}]
+    else:
+        fuentes = formatear_fuentes(resultado.docs_evidencia)
+
     yield (
         "data: " +
         json.dumps({"type": "sources", "data": fuentes}, ensure_ascii=False) +
@@ -2607,7 +2977,8 @@ def preguntar_stream(chain, question: str, retriever):
         "\n\n"
     )
 
-    for pedazo in chain.stream(question, docs=resultado.docs_evidencia):
+    fuente_iter = chain.stream(question) if resultado.modo_resumen else chain.stream(question, docs=resultado.docs_evidencia)
+    for pedazo in fuente_iter:
         yield (
             "data: " +
             json.dumps({"type": "chunk", "data": pedazo}, ensure_ascii=False) +
