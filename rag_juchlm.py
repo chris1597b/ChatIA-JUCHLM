@@ -1,9 +1,12 @@
 import json
+import os
 import re
 import hashlib
 import sys
+import threading
 import time
 import unicodedata
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
@@ -18,7 +21,7 @@ from langchain_core.documents import Document
 
 
 # ============================================================
-# RAG-JUCHLM v11 — DOCUMENTACIÓN GENERAL MULTI-ÁREA
+# RAG-JUCHLM v12 — DOCUMENTACIÓN GENERAL MULTI-ÁREA
 # ============================================================
 #
 # Objetivo:
@@ -81,9 +84,33 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 EMBEDDING_MODEL = "nomic-embed-text:latest"
 LLM_MODEL = "qwen3.5:4b"
 
-CURRENT_INDEX_SCHEMA_VERSION = 11
+# Item 20 (auditoría hardening): versión unificada. RAG_VERSION es la
+# versión "humana" del sistema completo (banner, logs, diagnóstico).
+# INDEX_SCHEMA_VERSION es SOLO el versionado del esquema de metadata
+# indexado en Chroma -- cambia cuando cambia la estructura de un
+# chunk/documento indexado (obliga a reprocesar todo el corpus).
+# No son el mismo número a propósito: RAG_VERSION puede subir sin
+# tocar el índice (ej. un cambio de prompt), pero cuando el índice sí
+# cambia de forma, ambos se actualizan juntos para que quede trazado.
+RAG_VERSION = "12.1"
+INDEX_SCHEMA_VERSION = 12
+CURRENT_INDEX_SCHEMA_VERSION = INDEX_SCHEMA_VERSION  # alias retrocompatible
 
 DEFAULT_AREA = "general"
+
+# ============================================================
+# PILOT MODE (item 29, auditoría hardening)
+# ============================================================
+#
+# Con PILOT_MODE=True se desactivan los validadores LLM y la
+# reparación automática, para medir primero accuracy/groundedness/
+# coverage/latencia con validación puramente heurística (que sigue
+# activa vía VALIDATOR_ENABLED). Los validadores LLM se activan
+# selectivamente después, ya con datos reales de qué tan seguido
+# hacen falta. PILOT_MODE se aplica una sola vez, al cargar el
+# módulo, sobre los flags de la sección VALIDACIÓN de abajo.
+# ============================================================
+PILOT_MODE = False
 
 
 # ============================================================
@@ -169,17 +196,71 @@ COMPLETENESS_VALIDATOR_LLM_ENABLED = True
 REPAIR_UNSUPPORTED_CLAIMS = True
 REPAIR_INCOMPLETE_ANSWER = True
 
-MAX_CLAIMS_TO_VERIFY = 10
+MAX_CLAIMS_TO_VERIFY = 10          # claims evaluados HEURÍSTICAMENTE (barato, siempre)
+# Item 11 (auditoría hardening): "claim budget" -- de los claims que
+# la heurística deja ambiguos/sensibles, solo los N más riesgosos se
+# mandan al LLM validator. El resto queda con el veredicto heurístico.
+MAX_LLM_CLAIMS_TO_VERIFY = 3
+# Item 14: circuit breaker -- tope duro de llamadas LLM de VALIDACIÓN
+# (claim validator + completeness validator + repair) por respuesta
+# completa. No cuenta la llamada de generación inicial. Al agotarse,
+# se detienen más validaciones LLM, se conserva la heurística, y la
+# respuesta se marca con validation_budget_exhausted=True en vez de
+# fallar o colgarse en latencia.
+MAX_VALIDATION_LLM_CALLS = 4
 MIN_CLAIM_TOKEN_OVERLAP = 0.22
 MIN_CLAIM_TOKEN_OVERLAP_STRICT = 0.40
+# Item 13: la reparación ya solo se intenta una vez en el flujo actual
+# (generar -> validar -> reparar -> revalidar -> fallback grounded),
+# pero lo hacemos explícito y configurable en vez de estar implícito
+# en la estructura del código.
+MAX_REPAIR_ATTEMPTS = 1
+
+
+# Item 29/36 (auditoría hardening): PILOT_MODE se aplica UNA vez, acá,
+# sobrescribiendo los flags de arriba -- así el resto del código sigue
+# leyendo las mismas variables de siempre (CLAIM_VALIDATOR_LLM_ENABLED,
+# etc.) sin tener que preguntar "¿estamos en piloto?" en cada función.
+if PILOT_MODE:
+    CLAIM_VALIDATOR_LLM_ENABLED = False
+    COMPLETENESS_VALIDATOR_LLM_ENABLED = False
+    REPAIR_UNSUPPORTED_CLAIMS = False
+    REPAIR_INCOMPLETE_ANSWER = False
+    # print() y no log(): log() se define más abajo en el archivo y
+    # este bloque corre a nivel de módulo, antes de esa definición.
+    print(
+        "PILOT_MODE activo: validadores LLM y reparación automática "
+        "desactivados. Validación heurística (VALIDATOR_ENABLED) sigue activa.",
+        flush=True,
+    )
 
 
 # ============================================================
 # CACHE LEXICAL
 # ============================================================
+#
+# Item 18 (auditoría): tanto LEXICAL_CACHE como _OCR_ENGINE (más abajo)
+# son estado global mutable, compartido si app.py corre bajo uvicorn
+# con varios workers en modo threaded o gunicorn con threads (no con
+# procesos separados, donde cada worker tiene su propio intérprete
+# y por tanto su propia copia de estos globals -- ahí no hace falta
+# lock, pero protegerlo no tiene costo real y evita un bug sutil si
+# el modelo de despliegue cambia).
+# - vector_db (cliente de Chroma) es seguro para uso concurrente
+#   según la librería, no se protege aquí.
+# - LEXICAL_CACHE se construye una vez y se lee muchas veces: el lock
+#   solo protege la construcción/invalidación, no cada lectura.
+# ============================================================
 
 LEXICAL_CACHE = None
+LEXICAL_CACHE_LOCK = threading.Lock()
 LEXICAL_INDEX_MAX_POSTING_DOCS = 50000
+# Item 5 (auditoría): por encima de este número de chunks, el cache
+# lexical en memoria (todo el corpus + postings) empieza a ser un
+# riesgo real de RAM. No migramos a un índice persistente todavía
+# (no está justificado por el tamaño actual), pero sí avisamos fuerte
+# para que se decida ANTES de que el proceso se quede sin memoria.
+LEXICAL_CACHE_WARN_CHUNKS = 20000
 
 
 # ============================================================
@@ -515,22 +596,67 @@ def cargar_manifest() -> dict:
             return {}
         return json.loads(contenido)
     except Exception as e:
-        log(f"ADVERTENCIA: no se pudo leer manifest.json: {e}")
-        return {}
+        # P0-2 (auditoría): un manifest corrupto NO se trata como
+        # "sin documentos indexados" para efectos de escritura -- eso
+        # llevaría a sincronizar_carpeta() a reindexar todo y luego
+        # SOBRESCRIBIR el manifest bueno-pero-ilegible con uno nuevo,
+        # perdiendo metadata (content_hash, ocr, etc.) que ya era
+        # correcta en Chroma. Se detiene el proceso explícitamente en
+        # vez de continuar con un estado ambiguo.
+        log(
+            f"ERROR CRÍTICO: manifest.json existe pero está corrupto: {e}. "
+            f"No se continúa para evitar sobrescribir el estado real de Chroma "
+            f"con un manifest vacío. Revisa/restaura manualmente "
+            f"'{MANIFEST_PATH}' (o su copia .bak si existe) antes de reintentar."
+        )
+        respaldo = MANIFEST_PATH.with_suffix(".json.bak")
+        if respaldo.exists():
+            try:
+                return json.loads(respaldo.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        raise RuntimeError(f"manifest.json corrupto e irrecuperable: {e}") from e
 
 
 def guardar_manifest(manifest: dict):
+    # P0-2 (auditoría): escritura atómica. Un corte de proceso a
+    # mitad de escritura NUNCA debe dejar manifest.json truncado --
+    # se escribe primero a un archivo temporal, se fuerza a disco
+    # (fsync) y solo entonces se reemplaza el archivo final de forma
+    # atómica (os.replace es atómico en POSIX y Windows modernos).
+    # Se conserva además un .bak del manifest previo por si el nuevo
+    # resultara -- por cualquier motivo -- inválido.
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+
+    if MANIFEST_PATH.exists():
+        try:
+            respaldo = MANIFEST_PATH.with_suffix(".json.bak")
+            respaldo.write_bytes(MANIFEST_PATH.read_bytes())
+        except Exception as e:
+            log(f"ADVERTENCIA: no se pudo actualizar manifest.json.bak: {e}")
+
+    tmp_path = MANIFEST_PATH.with_suffix(".json.tmp")
+    contenido = json.dumps(manifest, indent=2, ensure_ascii=False)
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(contenido)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, MANIFEST_PATH)
 
 
 def hash_archivo(path: Path) -> str:
-    stat = path.stat()
-    firma = f"{stat.st_size}-{stat.st_mtime_ns}"
-    return hashlib.md5(firma.encode("utf-8")).hexdigest()
+    """P1 (auditoría): hash de CONTENIDO real (SHA-256), no de
+    tamaño+mtime. El esquema anterior no detectaba: (a) un PDF
+    reemplazado por otro de igual tamaño con mtime manipulado, ni
+    (b) evitaba reprocesar cuando solo cambiaba el mtime sin cambiar
+    contenido. Se lee en bloques para no cargar el PDF completo en
+    memoria; el costo (unos ms por MB) es despreciable frente al
+    costo real de OCR/embeddings que ya se paga al reprocesar."""
+    sha256 = hashlib.sha256()
+    with open(path, "rb") as f:
+        for bloque in iter(lambda: f.read(1024 * 1024), b""):
+            sha256.update(bloque)
+    return sha256.hexdigest()
 
 
 def _area_de_path(path: Path) -> str:
@@ -577,12 +703,26 @@ def es_probable_escaneado(documents: list[Document]) -> bool:
 
 
 _OCR_ENGINE = None
+_OCR_ENGINE_LOCK = threading.Lock()
 
 
 def _get_ocr_engine():
     global _OCR_ENGINE
+    # Item 18 (auditoría): doble-check locking -- evita inicializar el
+    # engine dos veces si dos requests concurrentes llegan a la vez
+    # con _OCR_ENGINE aún en None (RapidOCR carga un modelo ONNX;
+    # inicializarlo dos veces desperdicia memoria y tiempo, aunque no
+    # corrompe nada).
     if _OCR_ENGINE is not None:
         return _OCR_ENGINE
+    with _OCR_ENGINE_LOCK:
+        if _OCR_ENGINE is not None:
+            return _OCR_ENGINE
+        _OCR_ENGINE = _inicializar_ocr_engine()
+    return _OCR_ENGINE
+
+
+def _inicializar_ocr_engine():
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as e:
@@ -729,7 +869,8 @@ splitter = RecursiveCharacterTextSplitter(
 
 def invalidar_cache_lexical():
     global LEXICAL_CACHE
-    LEXICAL_CACHE = None
+    with LEXICAL_CACHE_LOCK:
+        LEXICAL_CACHE = None
 
 
 # ============================================================
@@ -796,10 +937,21 @@ def sincronizar_carpeta():
         log(f"\n[{i}/{len(a_procesar)}] [{area}] {source_id}")
         inicio = time.time()
 
+        # --------------------------------------------------------
+        # P0-1 (auditoría): NO borrar antes de tener la versión nueva
+        # insertada y confirmada. Capturamos los IDs de la versión
+        # ANTERIOR (si existe) para poder borrarlos explícitamente
+        # DESPUÉS -- nunca antes -- de que add_documents() confirme
+        # éxito. Si cualquier paso intermedio falla (OCR, chunking,
+        # embeddings, Chroma), el documento anterior permanece intacto
+        # y consultable.
+        # --------------------------------------------------------
+        ids_version_anterior: list[str] = []
         try:
-            vector_db.delete(where={"source": source_id})
+            existentes = vector_db.get(where={"source": source_id}, include=[])
+            ids_version_anterior = existentes.get("ids") or []
         except Exception as e:
-            log(f"    -> Advertencia eliminando versión anterior: {e}")
+            log(f"    -> Advertencia consultando versión anterior en Chroma: {e}")
 
         try:
             docs, fue_ocr = cargar_pdf(path)
@@ -822,7 +974,7 @@ def sincronizar_carpeta():
 
         chunks = splitter.split_documents(docs)
         if not chunks:
-            log(f"    -> '{source_id}' no generó chunks.")
+            log(f"    -> '{source_id}' no generó chunks. Se conserva la versión anterior (si existía).")
             continue
 
         for chunk_index, chunk in enumerate(chunks):
@@ -846,16 +998,39 @@ def sincronizar_carpeta():
                 f"que: {', '.join(posibles_duplicados)}. Revisar si es un duplicado real."
             )
 
+        # Token único por corrida de ingesta: garantiza que los IDs
+        # nuevos NUNCA colisionan con los IDs antiguos (aunque el
+        # contenido sea idéntico), así add_documents() nunca falla
+        # por "ID ya existe" y no necesitamos borrar antes de insertar.
+        ingest_token = uuid.uuid4().hex[:8]
         ids = [
-            f"{source_id}::page-{c.metadata.get('page', 0)}::chunk-{i}"
+            f"{source_id}::page-{c.metadata.get('page', 0)}::chunk-{i}::{ingest_token}"
             for i, c in enumerate(chunks)
         ]
 
         try:
             vector_db.add_documents(documents=chunks, ids=ids)
         except Exception as e:
-            log(f"    -> ERROR indexando '{source_id}': {e}")
+            log(
+                f"    -> ERROR indexando '{source_id}': {e}. "
+                f"La versión anterior (si existía) NO fue tocada."
+            )
             continue
+
+        # Solo AHORA, con la versión nueva confirmada en Chroma,
+        # eliminamos explícitamente los IDs de la versión anterior
+        # (nunca por filtro "where source" amplio, que también
+        # borraría los chunks recién insertados si compartieran
+        # fuente).
+        if ids_version_anterior:
+            try:
+                vector_db.delete(ids=ids_version_anterior)
+            except Exception as e:
+                log(
+                    f"    -> ADVERTENCIA: no se pudo limpiar la versión "
+                    f"anterior de '{source_id}' ({e}). Pueden quedar "
+                    f"chunks duplicados temporalmente; no hay pérdida de datos."
+                )
 
         manifest[source_id] = {
             "firma": hash_archivo(path),
@@ -947,6 +1122,52 @@ class PipelineResult:
     answerability_reason: str = ""
     modo_resumen: bool = False
     fuente_resumen: Optional[str] = None
+    metricas: dict = field(default_factory=dict)
+
+
+# ============================================================
+# BATCH MULTI-PREGUNTA (items 3-9, 26 · auditoría hardening)
+# ============================================================
+#
+# Antes, cuando la pregunta traía varias subpreguntas ("¿expediente?,
+# ¿imputado?, ¿agraviado?, ¿fecha?"), TODAS competían por el mismo
+# ranking global y los mismos FINAL_CONTEXT_CHUNKS=8 -- una subpregunta
+# muy "afín" semánticamente podía monopolizar la evidencia y dejar a
+# las demás sin contexto, aunque el LLM de generación igual intentara
+# responderlas todas dentro del mismo prompt.
+#
+# Ahora, cuando se detectan 2+ subpreguntas, cada una corre su PROPIO
+# pipeline completo (paso 1 a 7) de forma independiente -- su propia
+# expansión de query, su propio retrieval, su propio answerability --
+# y el resultado se sintetiza preservando el orden original. Una
+# subpregunta sin evidencia NUNCA bloquea a las demás ni se inventa:
+# queda marcada como no cubierta, explícitamente.
+# ============================================================
+
+MAX_EVIDENCE_PER_SUBQUESTION = 3
+MIN_EVIDENCE_PER_SUBQUESTION = 1
+
+
+@dataclass
+class SubQuestionResult:
+    question: str
+    queries: list[str] = field(default_factory=list)
+    evidence: list[Document] = field(default_factory=list)
+    answerability_score: float = 0.0
+    answerability_reason: str = ""
+    answer: Optional[str] = None
+    covered: bool = False
+    confidence: float = 0.0
+
+
+@dataclass
+class BatchQuestionResult:
+    original_query: str
+    subquestions: list[SubQuestionResult] = field(default_factory=list)
+    covered_count: int = 0
+    uncovered_count: int = 0
+    coverage_score: float = 0.0
+    metricas: dict = field(default_factory=dict)
 
 
 # ============================================================
@@ -1141,10 +1362,20 @@ def _obtener_fuentes_explicitas(question: str, q_norm: str, q_tokens: set[str]) 
 
 
 def _area_de_fuentes(fuentes: list[str]) -> Optional[str]:
-    """Si todas las fuentes explícitas detectadas comparten área, la devuelve."""
+    """Si todas las fuentes explícitas detectadas comparten área, la devuelve.
+
+    A diferencia de la ruta de ingesta (donde un manifest corrupto debe
+    DETENER el proceso para no perder metadata), esta función corre en
+    cada pregunta del usuario: un manifest corrupto aquí no debe tumbar
+    las consultas -- se degrada a "área no determinada" y se sigue
+    dependiendo de la metadata que ya vive en Chroma."""
     if not fuentes:
         return None
-    manifest = cargar_manifest()
+    try:
+        manifest = cargar_manifest()
+    except RuntimeError as e:
+        log(f"ADVERTENCIA: manifest ilegible durante una consulta ({e}); se continúa sin filtrar por área heredada.")
+        return None
     areas = {manifest.get(f, {}).get("area", DEFAULT_AREA) for f in fuentes}
     if len(areas) == 1:
         return next(iter(areas))
@@ -1278,7 +1509,19 @@ def detectar_intencion(question: str) -> QueryContext:
         perfil=perfil,
         focus_terms=focus_terms,
         sensitive=sensitive,
-        requires_completeness=not es_resumen,
+        # Item 10 (auditoría): política explícita de costo de LLM por
+        # tipo de consulta -- NUNCA se recorta para sensibles/factuales:
+        #   general no sensible -> generación + heurística (sin
+        #     completeness LLM: una pregunta abierta rara vez tiene una
+        #     única "respuesta completa" verificable, y es la categoría
+        #     de mayor volumen -> aquí es donde más rinde ahorrar).
+        #   factual / comparación / sensible / resumen -> completeness
+        #     LLM sigue activo (resumen la deshabilita aparte, por su
+        #     propio flujo map-reduce que no pasa por este validador).
+        requires_completeness=(
+            not es_resumen
+            and (sensitive or tipo != "general")
+        ),
         es_resumen=es_resumen,
     )
 
@@ -1294,32 +1537,60 @@ def detectar_intencion(question: str) -> QueryContext:
 
 def _construir_lexical_index():
     global LEXICAL_CACHE
+    # Item 18 (auditoría): doble-check locking. Sin esto, dos requests
+    # concurrentes con cache frío podrían disparar dos reconstrucciones
+    # completas simultáneas (cada una trae TODO el corpus de Chroma) --
+    # no corrompe datos, pero duplica una operación costosa.
     if LEXICAL_CACHE is not None:
         return LEXICAL_CACHE
 
-    try:
-        data = vector_db.get(include=["documents", "metadatas"])
-    except Exception as e:
-        log(f"ADVERTENCIA construyendo índice lexical: {e}")
-        LEXICAL_CACHE = ([], defaultdict(set))
+    with LEXICAL_CACHE_LOCK:
+        if LEXICAL_CACHE is not None:
+            return LEXICAL_CACHE
+
+        try:
+            data = vector_db.get(include=["documents", "metadatas"])
+        except Exception as e:
+            log(f"ADVERTENCIA construyendo índice lexical: {e}")
+            LEXICAL_CACHE = ([], defaultdict(set))
+            return LEXICAL_CACHE
+
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+        docs = []
+        postings = defaultdict(set)
+
+        for i, (content, metadata) in enumerate(zip(documents, metadatas)):
+            metadata = dict(metadata or {})
+            doc = Document(page_content=content or "", metadata=metadata)
+            docs.append(doc)
+            for token in tokens_significativos(content or ""):
+                bucket = postings[token]
+                if len(bucket) < LEXICAL_INDEX_MAX_POSTING_DOCS:
+                    bucket.add(i)
+
+        # Item 5 (auditoría): métricas de tamaño del cache en memoria,
+        # con umbral de advertencia. No migramos automáticamente a un
+        # índice persistente (SQLite FTS5 sería la opción natural si
+        # esto se dispara con frecuencia) -- solo lo hacemos visible
+        # para decidir con datos reales, no por intuición.
+        n_chunks = len(docs)
+        n_tokens_unicos = len(postings)
+        log(
+            f"Índice lexical construido: {n_chunks} chunks, "
+            f"{n_tokens_unicos} tokens únicos en memoria."
+        )
+        if n_chunks > LEXICAL_CACHE_WARN_CHUNKS:
+            log(
+                f"ADVERTENCIA: el corpus supera LEXICAL_CACHE_WARN_CHUNKS="
+                f"{LEXICAL_CACHE_WARN_CHUNKS} chunks ({n_chunks}). El índice "
+                f"lexical en memoria puede empezar a pesar en RAM -- evaluar "
+                f"migrar a un índice persistente (ej. SQLite FTS5) si esto "
+                f"se sostiene o crece."
+            )
+
+        LEXICAL_CACHE = (docs, postings)
         return LEXICAL_CACHE
-
-    documents = data.get("documents") or []
-    metadatas = data.get("metadatas") or []
-    docs = []
-    postings = defaultdict(set)
-
-    for i, (content, metadata) in enumerate(zip(documents, metadatas)):
-        metadata = dict(metadata or {})
-        doc = Document(page_content=content or "", metadata=metadata)
-        docs.append(doc)
-        for token in tokens_significativos(content or ""):
-            bucket = postings[token]
-            if len(bucket) < LEXICAL_INDEX_MAX_POSTING_DOCS:
-                bucket.add(i)
-
-    LEXICAL_CACHE = (docs, postings)
-    return LEXICAL_CACHE
 
 
 def _filtrar_doc_por_ctx(doc: Document, ctx: QueryContext) -> bool:
@@ -1977,6 +2248,221 @@ def _un_pase_pipeline(ctx: QueryContext) -> tuple[list[Document], list, list[Doc
     return candidatos, ranking, aislados, evidencia, scores, answerable, answer_score, answer_reason
 
 
+def puede_relajar_answerability(ctx: QueryContext, candidatos: list[Document]) -> tuple[bool, str]:
+    """P1 (auditoría): distingue explícitamente cuándo es seguro
+    relajar el umbral de answerability de cuándo NO lo es.
+
+    Relajable (A): evidencia débil pero potencialmente relevante --
+    el usuario no restringió nada, o restringió algo que SÍ tiene
+    contenido recuperado, solo que el score híbrido general es bajo.
+
+    NO relajable:
+      B) documento incorrecto -- el usuario pidió un archivo/fuente
+         explícita y no hay NINGÚN candidato de esa fuente.
+      C) página incorrecta -- pidió una página explícita y no hay
+         NINGÚN chunk de esa página en los candidatos.
+      D) área incompatible -- pidió un área explícita y no hay
+         candidatos de esa área.
+    En estos casos, relajar el umbral fabricaría una respuesta sobre
+    una restricción que el sistema sabe que no puede satisfacer --
+    exactamente el comportamiento que NO queremos en un RAG
+    institucional."""
+    if not candidatos:
+        return False, "sin candidatos: nada que relajar"
+
+    if ctx.pagina_explicita is not None:
+        if not any(d.metadata.get("page") == ctx.pagina_explicita for d in candidatos):
+            return False, "página explícita sin ningún chunk recuperado (C)"
+
+    fuentes_pedidas = set(ctx.fuentes_explicitas) if ctx.fuentes_explicitas else (
+        {ctx.fuente_explicita} if ctx.fuente_explicita else set()
+    )
+    if fuentes_pedidas:
+        if not any(d.metadata.get("source") in fuentes_pedidas for d in candidatos):
+            return False, "documento explícito sin ningún chunk recuperado (B)"
+
+    if ctx.area_explicita:
+        if not any(d.metadata.get("area") == ctx.area_explicita for d in candidatos):
+            return False, "área explícita sin ningún chunk recuperado (D)"
+
+    return True, "evidencia débil pero dentro del alcance solicitado (A)"
+
+
+def ejecutar_pipeline_batch(question: str) -> Optional[BatchQuestionResult]:
+    """Items 3-9, 26 (auditoría hardening): si la pregunta trae 2+
+    subpreguntas reales, cada una corre su PROPIO pipeline de
+    retrieval (pasos 1-7) de forma independiente -- nunca comparten
+    ranking ni el mismo cupo de FINAL_CONTEXT_CHUNKS. Devuelve None
+    si no hay batch real (pregunta simple), señal para que el
+    llamador use el camino de pregunta única sin cambios."""
+    ctx_global = detectar_intencion(question)
+    if len(ctx_global.subpreguntas) < 2:
+        return None
+
+    log(f"\n--- Batch detectado: {len(ctx_global.subpreguntas)} subpreguntas ---")
+
+    resultados: list[SubQuestionResult] = []
+    for sub in ctx_global.subpreguntas:
+        ctx_sub = detectar_intencion(sub)
+
+        # Item 5: una subpregunta sin restricción propia hereda la
+        # restricción del enunciado completo (ej. "según el expediente
+        # X: ¿quién es el acusado? ¿cuál es la fecha?" -- ambas deben
+        # quedar acotadas al expediente X, aunque solo se mencione una vez).
+        if not ctx_sub.fuente_explicita and not ctx_sub.fuentes_explicitas:
+            ctx_sub.fuente_explicita = ctx_global.fuente_explicita
+            ctx_sub.fuentes_explicitas = ctx_global.fuentes_explicitas
+        if ctx_sub.area_explicita is None and ctx_global.area_explicita:
+            ctx_sub.area_explicita = ctx_global.area_explicita
+            ctx_sub.area = ctx_global.area
+        if ctx_sub.pagina_explicita is None and ctx_global.pagina_explicita is not None:
+            ctx_sub.pagina_explicita = ctx_global.pagina_explicita
+
+        candidatos = recuperar_candidatos(ctx_sub)
+        candidatos = rerank_candidatos(ctx_sub, candidatos)
+        ranking = identificar_documento_relevante(ctx_sub, candidatos)
+        aislados = aislar_documento(ctx_sub, ranking)
+        evidencia, _scores = seleccionar_evidencia(ctx_sub, aislados)
+        # Item 5: tope por subpregunta, para que una subpregunta no
+        # consuma toda la capacidad de evidencia y deje a las demás sin contexto.
+        evidencia = evidencia[:MAX_EVIDENCE_PER_SUBQUESTION]
+
+        answerable, score, reason = evaluar_answerability(ctx_sub, candidatos)
+        cubierta = answerable and len(evidencia) >= MIN_EVIDENCE_PER_SUBQUESTION
+
+        resultados.append(SubQuestionResult(
+            question=sub,
+            queries=ctx_sub.query_variants,
+            evidence=evidencia if cubierta else [],
+            answerability_score=score,
+            answerability_reason=reason,
+            answer=None,
+            covered=cubierta,
+            confidence=score if cubierta else 0.0,
+        ))
+        log(f"  [{'cubierta' if cubierta else 'SIN evidencia'}] {sub!r} -> score {score:.4f} ({reason})")
+
+    covered_count = sum(1 for r in resultados if r.covered)
+    total = len(resultados)
+    coverage_score = round(covered_count / total, 4) if total else 0.0
+
+    return BatchQuestionResult(
+        original_query=question,
+        subquestions=resultados,
+        covered_count=covered_count,
+        uncovered_count=total - covered_count,
+        coverage_score=coverage_score,
+        metricas={
+            "query_type": "batch",
+            "subquestions": total,
+            "covered_subquestions": covered_count,
+            "uncovered_subquestions": total - covered_count,
+            "coverage_score": coverage_score,
+        },
+    )
+
+
+SUBANSWER_PROMPT_TEMPLATE = """
+Eres el asistente documental local de la institución. Responde
+ÚNICAMENTE esta subpregunta, usando EXCLUSIVAMENTE el contexto dado.
+
+No uses conocimiento externo. No inventes datos. Si el contexto no
+alcanza para responder con certeza, dilo explícitamente en vez de
+adivinar. Sé directo: da el dato pedido primero, sin preámbulo.
+
+CONTEXTO:
+{context}
+
+SUBPREGUNTA:
+{question}
+
+RESPUESTA (solo a esta subpregunta):
+"""
+
+NO_EVIDENCIA_SUBPREGUNTA = (
+    "No encontré evidencia suficiente en los documentos recuperados "
+    "para responder esta parte."
+)
+
+
+def generar_respuesta_batch(llm, batch: BatchQuestionResult) -> tuple[str, dict]:
+    """Items 7-9, 27 (auditoría hardening): genera una subrespuesta por
+    subpregunta CUBIERTA (grounded, prompt acotado a su propia
+    evidencia), y NADA para las no cubiertas -- ahí se usa el mensaje
+    fijo de abstención, sin tocar el LLM. Costo deliberadamente bajo:
+    sin claim/completeness validator LLM por subpregunta (eso
+    multiplicaría el costo por N subpreguntas); en su lugar, un check
+    heurístico barato (_validar_claim_basico) descarta subrespuestas
+    obviamente no respaldadas por su propia evidencia."""
+    prompt = ChatPromptTemplate.from_template(SUBANSWER_PROMPT_TEMPLATE)
+    llm_generation_calls = 0
+    lineas = []
+    fuentes_todas: list[Document] = []
+
+    for i, sub in enumerate(batch.subquestions, 1):
+        pregunta_limpia = sub.question.strip().rstrip("?¿").strip()
+
+        if not sub.covered or not sub.evidence:
+            lineas.append(f"{i}. {pregunta_limpia}: {NO_EVIDENCIA_SUBPREGUNTA}")
+            continue
+
+        contexto_sub = formatear_contexto(sub.evidence)
+        try:
+            llm_generation_calls += 1
+            respuesta = llm.invoke(
+                prompt.format_messages(context=contexto_sub, question=sub.question)
+            )
+            texto = str(getattr(respuesta, "content", "") or "").strip()
+        except Exception as e:
+            log(f"    -> ERROR LLM subrespuesta '{sub.question}': {e}")
+            texto = ""
+
+        if not texto:
+            lineas.append(f"{i}. {pregunta_limpia}: {NO_EVIDENCIA_SUBPREGUNTA}")
+            sub.covered = False
+            continue
+
+        # Check heurístico barato (sin LLM): ¿la subrespuesta tiene
+        # AL MENOS un claim con respaldo básico en su propia evidencia?
+        frases = dividir_en_frases(texto)
+        hay_respaldo = False
+        for frase in frases[:5]:
+            ok, _overlap, _reason = _validar_claim_basico(frase, contexto_sub, QueryContext(question=sub.question, sensitive=False))
+            if ok:
+                hay_respaldo = True
+                break
+
+        if not hay_respaldo and frases:
+            lineas.append(f"{i}. {pregunta_limpia}: {NO_EVIDENCIA_SUBPREGUNTA}")
+            sub.covered = False
+            continue
+
+        sub.answer = texto
+        fuentes_todas.extend(sub.evidence)
+        lineas.append(f"{i}. {pregunta_limpia}: {texto}")
+
+    respuesta_final = "\n".join(lineas)
+
+    # Recalcular cobertura real (post heurística, puede bajar si algún
+    # LLM call falló o el check heurístico descartó la subrespuesta).
+    covered_final = sum(1 for s in batch.subquestions if s.covered)
+    total = len(batch.subquestions)
+    coverage_final = round(covered_final / total, 4) if total else 0.0
+
+    return respuesta_final, {
+        "validated": True,
+        "repaired": False,
+        "batch": True,
+        "subquestions": total,
+        "covered_subquestions": covered_final,
+        "uncovered_subquestions": total - covered_final,
+        "coverage_score": coverage_final,
+        "llm_generation_calls": llm_generation_calls,
+        "llm_validation_calls": 0,
+        "fuentes_batch": fuentes_todas,
+    }
+
+
 def ejecutar_pipeline(question: str) -> PipelineResult:
     metricas_tiempo = {}
     t0 = time.time()
@@ -1989,25 +2475,30 @@ def ejecutar_pipeline(question: str) -> PipelineResult:
 
     # --------------------------------------------------------
     # Item 15: reintento con señal relajada ANTES de abstenerse.
-    # Solo si el primer pase falló por señal débil (no por
-    # restricción explícita sin evidencia real), para no convertir
-    # cualquier pregunta ambigua en una respuesta forzada.
+    # P1 (auditoría): la relajación ahora pasa primero por
+    # puede_relajar_answerability(), que bloquea explícitamente los
+    # casos de documento/página/área incorrectos -- ahí NO se relaja,
+    # se abstiene con el motivo real.
     # --------------------------------------------------------
     intento_relajado = False
     if not answerable and candidatos:
-        intento_relajado = True
-        t2 = time.time()
-        top = candidatos[0]
-        best_hybrid = float(top.metadata.get("_hybrid_score", 0.0) or 0.0)
-        best_sem = float(top.metadata.get("_semantic_score", 0.0) or 0.0)
-        umbral_relajado = max(0.30, ANSWERABILITY_MIN_GENERAL - 0.10)
-        if best_hybrid >= umbral_relajado or best_sem >= ANSWERABILITY_SEMANTIC_ONLY_MIN:
-            evidencia, scores = seleccionar_evidencia(ctx, aislados)
-            if evidencia:
-                answerable = True
-                answer_score = best_hybrid
-                answer_reason = "reintento con umbral relajado (retrieval débil, no ausencia de evidencia)"
-        metricas_tiempo["reintento_relajado"] = time.time() - t2
+        se_puede_relajar, motivo_relajacion = puede_relajar_answerability(ctx, candidatos)
+        if se_puede_relajar:
+            intento_relajado = True
+            t2 = time.time()
+            top = candidatos[0]
+            best_hybrid = float(top.metadata.get("_hybrid_score", 0.0) or 0.0)
+            best_sem = float(top.metadata.get("_semantic_score", 0.0) or 0.0)
+            umbral_relajado = max(0.30, ANSWERABILITY_MIN_GENERAL - 0.10)
+            if best_hybrid >= umbral_relajado or best_sem >= ANSWERABILITY_SEMANTIC_ONLY_MIN:
+                evidencia, scores = seleccionar_evidencia(ctx, aislados)
+                if evidencia:
+                    answerable = True
+                    answer_score = best_hybrid
+                    answer_reason = f"reintento con umbral relajado ({motivo_relajacion})"
+            metricas_tiempo["reintento_relajado"] = time.time() - t2
+        else:
+            answer_reason = f"sin reintento: {motivo_relajacion}"
 
     if not answerable:
         evidencia = []
@@ -2029,9 +2520,36 @@ def ejecutar_pipeline(question: str) -> PipelineResult:
         answer_score = ranking[0][0] if ranking else 0.0
 
     scores_hybrid = [float(d.metadata.get("_hybrid_score", 0.0) or 0.0) for d in candidatos]
+    documentos_considerados = len({d.metadata.get("source") for d in candidatos})
+    paginas_consideradas = len({(d.metadata.get("source"), d.metadata.get("page")) for d in candidatos})
+    ocr_documentos = len({d.metadata.get("source") for d in candidatos if d.metadata.get("ocr")})
+
+    # Item 11 (auditoría): estructura consistente para observabilidad,
+    # además del log en texto libre -- esto es lo que un endpoint
+    # /metrics o un dashboard consumiría sin tener que parsear logs.
+    metricas = {
+        "query_analysis_ms": round(metricas_tiempo.get("query_analysis", 0.0) * 1000, 1),
+        "retrieval_ms": round(metricas_tiempo.get("retrieval_pase_1", 0.0) * 1000, 1),
+        "reintento_relajado_ms": round(metricas_tiempo.get("reintento_relajado", 0.0) * 1000, 1),
+        "documents_considered": documentos_considerados,
+        "pages_considered": paginas_consideradas,
+        "chunks_retrieved": len(candidatos),
+        "chunks_final": len(evidencia),
+        "max_hybrid_score": round(max(scores_hybrid), 4) if scores_hybrid else 0.0,
+        "avg_hybrid_score": round(sum(scores_hybrid) / len(scores_hybrid), 4) if scores_hybrid else 0.0,
+        "answerability_score": round(answer_score, 4),
+        "answerability_reason": answer_reason,
+        "retry_relaxed_used": intento_relajado,
+        "area_detected": ctx.area,
+        "profile_detected": ctx.perfil,
+        "sensitive_query": ctx.sensitive,
+        "modo_resumen": modo_resumen,
+        "ocr_documents_in_candidates": ocr_documentos,
+    }
+
     log(
         "\n--- Métricas del pipeline ---\n"
-        f"  Documentos candidatos (fuentes distintas): {len({d.metadata.get('source') for d in candidatos})}\n"
+        f"  Documentos candidatos (fuentes distintas): {documentos_considerados}\n"
         f"  Chunks candidatos: {len(candidatos)}\n"
         f"  Chunks finales de evidencia: {len(evidencia)}\n"
         f"  Score máximo: {max(scores_hybrid):.4f}" if scores_hybrid else "  Score máximo: 0.0000"
@@ -2054,6 +2572,7 @@ def ejecutar_pipeline(question: str) -> PipelineResult:
         answerability_reason=answer_reason,
         modo_resumen=modo_resumen,
         fuente_resumen=fuente_resumen,
+        metricas=metricas,
     )
 
 
@@ -2173,6 +2692,8 @@ def generar_resumen_documento(llm, ctx: QueryContext, chunks: list[Document]) ->
     if not chunks:
         return "No encontré información suficiente en los documentos indexados para responder esa pregunta."
 
+    total_original = len(chunks)
+    truncado = total_original > MAX_RESUMEN_TOTAL_CHUNKS
     chunks = chunks[:MAX_RESUMEN_TOTAL_CHUNKS]
 
     bloques: list[list[Document]] = []
@@ -2190,6 +2711,20 @@ def generar_resumen_documento(llm, ctx: QueryContext, chunks: list[Document]) ->
         bloques.append(actual)
 
     log(f"    -> Modo resumen: {len(chunks)} chunks en {len(bloques)} bloque(s).")
+    if truncado:
+        log(
+            f"    -> ADVERTENCIA: el documento tiene {total_original} chunks, "
+            f"por encima del tope MAX_RESUMEN_TOTAL_CHUNKS={MAX_RESUMEN_TOTAL_CHUNKS}. "
+            f"El resumen cubrirá solo los primeros {MAX_RESUMEN_TOTAL_CHUNKS}."
+        )
+
+    aviso_truncado = (
+        f"\n\n_Nota: este documento es extenso ({total_original} fragmentos indexados). "
+        f"El resumen cubre las primeras secciones (hasta {MAX_RESUMEN_TOTAL_CHUNKS} fragmentos); "
+        f"puede no incluir el contenido final del documento. Pregunta por una página o "
+        f"sección específica si necesitas esa parte._"
+        if truncado else ""
+    )
 
     prompt_bloque = ChatPromptTemplate.from_template(RESUMEN_BLOQUE_PROMPT)
     resumenes_parciales = []
@@ -2207,7 +2742,7 @@ def generar_resumen_documento(llm, ctx: QueryContext, chunks: list[Document]) ->
         return "No encontré información suficiente en los documentos indexados para responder esa pregunta."
 
     if len(resumenes_parciales) == 1:
-        return resumenes_parciales[0]
+        return resumenes_parciales[0] + aviso_truncado
 
     prompt_sintesis = ChatPromptTemplate.from_template(RESUMEN_SINTESIS_PROMPT)
     try:
@@ -2218,10 +2753,10 @@ def generar_resumen_documento(llm, ctx: QueryContext, chunks: list[Document]) ->
             )
         )
         final = str(getattr(respuesta, "content", "") or "").strip()
-        return final if final else "\n\n".join(resumenes_parciales)
+        return (final if final else "\n\n".join(resumenes_parciales)) + aviso_truncado
     except Exception as e:
         log(f"    -> Error en síntesis final del resumen: {e}")
-        return "\n\n".join(resumenes_parciales)
+        return "\n\n".join(resumenes_parciales) + aviso_truncado
 
 
 # ============================================================
@@ -2498,7 +3033,17 @@ def _validar_claim_basico(claim: str, context: str, ctx: QueryContext) -> tuple[
     return False, overlap, "baja coincidencia"
 
 
-def validar_claim_con_llm(llm, context: str, claim: str) -> bool:
+def validar_claim_con_llm(llm, context: str, claim: str) -> Optional[bool]:
+    """Devuelve True (respaldada), False (no respaldada) o None (el
+    validator FALLÓ -- estado VALIDATION_ERROR).
+
+    P0 (auditoría): antes, un error de Ollama/timeout hacía `return True`
+    (fail-open), lo que podía dar por respaldada CUALQUIER afirmación
+    cuando el validator en realidad nunca se ejecutó. Para un RAG
+    institucional eso es peligroso: ahora el error se distingue
+    explícitamente (None) y quien llama decide -- pero el default en
+    `validar_respuesta()` es tratar None como NO respaldada (fail-closed),
+    nunca como validación exitosa."""
     if not CLAIM_VALIDATOR_LLM_ENABLED:
         return True
     prompt = ChatPromptTemplate.from_template(CLAIM_VALIDATION_PROMPT)
@@ -2509,51 +3054,88 @@ def validar_claim_con_llm(llm, context: str, claim: str) -> bool:
         contenido = str(getattr(respuesta, "content", "") or "").strip().upper()
         return contenido.startswith("RESPALDADA")
     except Exception as e:
-        log(f"    -> Validator LLM error: {e}")
-        return True
+        log(f"    -> VALIDATION_ERROR (claim validator): {e}")
+        return None
 
 
-def validar_respuesta(llm, answer: str, docs: list[Document], ctx: QueryContext) -> dict:
+def validar_respuesta(llm, answer: str, docs: list[Document], ctx: QueryContext, presupuesto: dict) -> dict:
+    """Item 11/14 (auditoría hardening): la heurística (barata) corre
+    SIEMPRE sobre todos los claims. El LLM validator es el recurso
+    caro -- se reserva para los MAX_LLM_CLAIMS_TO_VERIFY claims más
+    riesgosos (sensibles primero, luego menor overlap = más ambiguo),
+    y respeta `presupuesto` (el circuit breaker compartido de la
+    consulta completa: claim validator + completeness + repair no
+    pueden sumar más de MAX_VALIDATION_LLM_CALLS llamadas LLM)."""
     answer_clean = limpiar_fuentes_generadas(answer)
     context = formatear_contexto(docs)
     frases = dividir_en_frases(answer_clean)
 
     claims = []
-    unsupported = []
-
-    for index, claim in enumerate(frases[:MAX_CLAIMS_TO_VERIFY]):
+    for claim in frases[:MAX_CLAIMS_TO_VERIFY]:
         ok, overlap, reason = _validar_claim_basico(claim, context, ctx)
-
-        if (
+        necesita_llm = (
             ok
             and VALIDATOR_ENABLED
             and CLAIM_VALIDATOR_LLM_ENABLED
             and len(claim) >= 20
             and (ctx.sensitive or overlap < 0.75)
-        ):
-            if not validar_claim_con_llm(llm, context, claim):
-                ok = False
-                reason = "validator LLM: no respaldada"
-
-        item = {
+        )
+        claims.append({
             "claim": claim,
             "ok": ok,
             "overlap": overlap,
             "reason": reason,
-        }
-        claims.append(item)
-        if not ok:
-            unsupported.append(item)
+            "_necesita_llm": necesita_llm,
+            # riesgo: sensible primero (0 antes que 1), luego menor
+            # overlap primero (más ambiguo = más riesgoso).
+            "_riesgo": (0 if ctx.sensitive else 1, overlap),
+        })
+
+    candidatos_llm = sorted(
+        (c for c in claims if c["_necesita_llm"]),
+        key=lambda c: c["_riesgo"],
+    )[:MAX_LLM_CLAIMS_TO_VERIFY]
+
+    for item in candidatos_llm:
+        if presupuesto.get("llm_calls", 0) >= MAX_VALIDATION_LLM_CALLS:
+            presupuesto["budget_exhausted"] = True
+            item["reason"] = item["reason"] + " (sin verificar por LLM: presupuesto de validación agotado)"
+            break
+        presupuesto["llm_calls"] = presupuesto.get("llm_calls", 0) + 1
+        resultado_llm = validar_claim_con_llm(llm, context, item["claim"])
+        if resultado_llm is None:
+            # P0: VALIDATION_ERROR -- el validator no pudo ejecutarse.
+            # Fail-closed: nunca se declara "validado" por default.
+            item["ok"] = False
+            item["reason"] = "VALIDATION_ERROR: el validator LLM falló, claim tratado como no respaldado"
+        elif not resultado_llm:
+            item["ok"] = False
+            item["reason"] = "validator LLM: no respaldada"
+        else:
+            item["reason"] = "validator LLM: respaldada"
+
+    for item in claims:
+        item.pop("_necesita_llm", None)
+        item.pop("_riesgo", None)
+
+    unsupported = [c for c in claims if not c["ok"]]
 
     return {
         "ok": len(unsupported) == 0,
         "claims": claims,
         "unsupported": unsupported,
         "answer_clean": answer_clean,
+        "llm_claim_checks": len(candidatos_llm),
     }
 
 
-def validar_completitud_con_llm(llm, question: str, context: str, answer: str) -> bool:
+def validar_completitud_con_llm(llm, question: str, context: str, answer: str) -> Optional[bool]:
+    """Devuelve True (completa), False (incompleta) o None (VALIDATION_ERROR).
+
+    P0 (auditoría): antes, un error del validator devolvía `True`
+    (fail-open) -> una respuesta podía declararse "completa" sin haber
+    sido evaluada. Ahora el error se distingue y el llamador decide;
+    el default aguas abajo es fail-closed (tratar como incompleta)."""
     if not COMPLETENESS_VALIDATOR_LLM_ENABLED:
         return True
     prompt = ChatPromptTemplate.from_template(COMPLETENESS_VALIDATION_PROMPT)
@@ -2568,8 +3150,8 @@ def validar_completitud_con_llm(llm, question: str, context: str, answer: str) -
         contenido = str(getattr(respuesta, "content", "") or "").strip().upper()
         return contenido.startswith("COMPLETA")
     except Exception as e:
-        log(f"    -> Completeness validator error: {e}")
-        return True
+        log(f"    -> VALIDATION_ERROR (completeness validator): {e}")
+        return None
 
 
 # ============================================================
@@ -2619,16 +3201,36 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
             {"validated": True, "repaired": False},
         )
 
-    validacion = validar_respuesta(llm, draft, docs, ctx)
+    # Item 14 (auditoría hardening): presupuesto compartido de llamadas
+    # LLM de validación (claim + completeness + repair-revalidación)
+    # para TODA esta respuesta. Es un dict mutable a propósito: se pasa
+    # por referencia y cada función que consume presupuesto lo actualiza.
+    presupuesto = {"llm_calls": 0, "budget_exhausted": False}
+
+    validacion = validar_respuesta(llm, draft, docs, ctx, presupuesto)
     completeness_ok = True
+    completeness_status = "not_run"
 
     if VALIDATOR_ENABLED and ctx.requires_completeness:
-        completeness_ok = validar_completitud_con_llm(
-            llm,
-            question,
-            context,
-            validacion["answer_clean"],
-        )
+        if presupuesto["llm_calls"] >= MAX_VALIDATION_LLM_CALLS:
+            presupuesto["budget_exhausted"] = True
+            completeness_status = "budget_exhausted"
+            completeness_ok = False  # fail-closed: no evaluado, no se asume completa
+        else:
+            presupuesto["llm_calls"] += 1
+            resultado_completitud = validar_completitud_con_llm(
+                llm,
+                question,
+                context,
+                validacion["answer_clean"],
+            )
+            if resultado_completitud is None:
+                # P0: VALIDATION_ERROR -- fail-closed, nunca se asume completa.
+                completeness_ok = False
+                completeness_status = "validation_error"
+            else:
+                completeness_ok = resultado_completitud
+                completeness_status = "ok" if resultado_completitud else "incomplete"
 
     if validacion["ok"] and completeness_ok:
         return (
@@ -2638,10 +3240,26 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
                 "repaired": False,
                 "unsupported": 0,
                 "complete": True,
+                "completeness_status": completeness_status,
+                "llm_validation_calls": presupuesto["llm_calls"],
+                "validation_budget_exhausted": presupuesto["budget_exhausted"],
             },
         )
 
-    if REPAIR_UNSUPPORTED_CLAIMS or (REPAIR_INCOMPLETE_ANSWER and not completeness_ok):
+    # Item 13: reparación selectiva -- solo si hay algo reparable
+    # (claims no soportados) o incompletitud con evidencia adicional
+    # disponible (docs no vacíos), y solo UN intento (MAX_REPAIR_ATTEMPTS).
+    hay_algo_que_reparar = len(validacion["unsupported"]) > 0 or not completeness_ok
+    puede_reparar = bool(docs) and MAX_REPAIR_ATTEMPTS >= 1
+    presupuesto_disponible = presupuesto["llm_calls"] < MAX_VALIDATION_LLM_CALLS
+
+    if (
+        hay_algo_que_reparar
+        and puede_reparar
+        and presupuesto_disponible
+        and (REPAIR_UNSUPPORTED_CLAIMS or (REPAIR_INCOMPLETE_ANSWER and not completeness_ok))
+    ):
+        presupuesto["llm_calls"] += 1
         repaired = reparar_respuesta(
             llm,
             question,
@@ -2649,13 +3267,21 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
             docs,
         )
 
-        validacion_reparada = validar_respuesta(llm, repaired, docs, ctx)
-        completeness_reparada = validar_completitud_con_llm(
-            llm,
-            question,
-            context,
-            validacion_reparada["answer_clean"],
-        ) if VALIDATOR_ENABLED else True
+        validacion_reparada = validar_respuesta(llm, repaired, docs, ctx, presupuesto)
+        if VALIDATOR_ENABLED and presupuesto["llm_calls"] < MAX_VALIDATION_LLM_CALLS:
+            presupuesto["llm_calls"] += 1
+            resultado_completitud_reparada = validar_completitud_con_llm(
+                llm,
+                question,
+                context,
+                validacion_reparada["answer_clean"],
+            )
+            # Fail-closed también tras reparar: un error del validator
+            # aquí NO debe convertir una respuesta reparada en "completa".
+            completeness_reparada = bool(resultado_completitud_reparada)
+        else:
+            presupuesto["budget_exhausted"] = True
+            completeness_reparada = False
 
         if validacion_reparada["ok"] and completeness_reparada:
             return (
@@ -2665,6 +3291,8 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
                     "repaired": True,
                     "unsupported_before": len(validacion["unsupported"]),
                     "complete": True,
+                    "llm_validation_calls": presupuesto["llm_calls"],
+                    "validation_budget_exhausted": presupuesto["budget_exhausted"],
                 },
             )
 
@@ -2678,6 +3306,8 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
                     "partial": True,
                     "complete": False,
                     "unsupported_before": len(validacion["unsupported"]),
+                    "llm_validation_calls": presupuesto["llm_calls"],
+                    "validation_budget_exhausted": presupuesto["budget_exhausted"],
                 },
             )
 
@@ -2689,6 +3319,8 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
             "failed_validation": True,
             "complete": False,
             "unsupported": len(validacion["unsupported"]),
+            "llm_validation_calls": presupuesto["llm_calls"],
+            "validation_budget_exhausted": presupuesto["budget_exhausted"],
         },
     )
 
@@ -2717,6 +3349,20 @@ def construir_chain():
     class ChainCompatible:
         def stream(self, question, docs=None):
             if docs is None:
+                # Items 3-9 (auditoría hardening): batch multi-pregunta
+                # tiene prioridad sobre el camino de pregunta única.
+                batch = ejecutar_pipeline_batch(question)
+                if batch is not None:
+                    respuesta, validacion = generar_respuesta_batch(llm, batch)
+                    log(
+                        f"\n--- Batch: {validacion['covered_subquestions']}/"
+                        f"{validacion['subquestions']} cubiertas "
+                        f"(coverage_score={validacion['coverage_score']}) ---"
+                    )
+                    for pos in range(0, len(respuesta), 160):
+                        yield respuesta[pos:pos + 160]
+                    return
+
                 resultado = ejecutar_pipeline(question)
                 if not resultado.answerable:
                     yield "No encontré información suficiente en los documentos indexados para responder esa pregunta."
@@ -2773,6 +3419,11 @@ def construir_chain():
                 yield respuesta[pos:pos + 160]
 
         def invoke(self, question):
+            batch = ejecutar_pipeline_batch(question)
+            if batch is not None:
+                respuesta, _ = generar_respuesta_batch(llm, batch)
+                return Document(page_content=respuesta)
+
             resultado = ejecutar_pipeline(question)
             if not resultado.answerable:
                 return Document(
@@ -2889,6 +3540,28 @@ def imprimir_debug(resultado: PipelineResult):
 
 def preguntar(chain, question: str, retriever):
     inicio = time.time()
+
+    batch = ejecutar_pipeline_batch(question)
+    if batch is not None:
+        print(
+            f"--- Batch: {len(batch.subquestions)} subpreguntas | "
+            f"coverage_score={batch.coverage_score} ---\n"
+        )
+        for sub in batch.subquestions:
+            estado = "cubierta" if sub.covered else "SIN evidencia"
+            print(f"  [{estado}] {sub.question!r} (score {sub.answerability_score:.4f})")
+        print()
+        respuesta_completa = ""
+        primer_fragmento = None
+        for pedazo in chain.stream(question):
+            if primer_fragmento is None:
+                primer_fragmento = time.time()
+                print(f"[primer fragmento en {primer_fragmento - inicio:.2f}s]\n")
+            respuesta_completa += pedazo
+            print(pedazo, end="", flush=True)
+        print(f"\n\n[Completado en {time.time() - inicio:.2f}s]")
+        return
+
     resultado = ejecutar_pipeline(question)
     imprimir_debug(resultado)
     print(f"[Contexto final: {len(resultado.docs_evidencia)} chunks | modo resumen: {resultado.modo_resumen}]\n")
@@ -2935,6 +3608,57 @@ def preguntar(chain, question: str, retriever):
 
 
 def preguntar_stream(chain, question: str, retriever):
+    batch = ejecutar_pipeline_batch(question)
+    if batch is not None:
+        fuentes_batch = []
+        vistos_batch = set()
+        for sub in batch.subquestions:
+            for doc in sub.evidence:
+                clave = (doc.metadata.get("source"), doc.metadata.get("page"))
+                if clave in vistos_batch:
+                    continue
+                vistos_batch.add(clave)
+                fuentes_batch.append({
+                    "source": doc.metadata.get("source", "?"),
+                    "area": doc.metadata.get("area", DEFAULT_AREA),
+                    "page": (doc.metadata.get("page") + 1) if doc.metadata.get("page") is not None else None,
+                })
+        yield (
+            "data: " +
+            json.dumps({"type": "sources", "data": fuentes_batch}, ensure_ascii=False) +
+            "\n\n"
+        )
+        # Item 6/27: el frontend puede mostrar la cobertura explícitamente
+        # sin tener que parsear el texto de la respuesta.
+        yield (
+            "data: " +
+            json.dumps(
+                {
+                    "type": "coverage",
+                    "data": {
+                        "subquestions": len(batch.subquestions),
+                        "covered": batch.covered_count,
+                        "uncovered": batch.uncovered_count,
+                        "coverage_score": batch.coverage_score,
+                    },
+                },
+                ensure_ascii=False,
+            ) +
+            "\n\n"
+        )
+        for pedazo in chain.stream(question):
+            yield (
+                "data: " +
+                json.dumps({"type": "chunk", "data": pedazo}, ensure_ascii=False) +
+                "\n\n"
+            )
+        yield (
+            "data: " +
+            json.dumps({"type": "done"}, ensure_ascii=False) +
+            "\n\n"
+        )
+        return
+
     resultado = ejecutar_pipeline(question)
 
     if not resultado.answerable or (not resultado.modo_resumen and not resultado.docs_evidencia):
