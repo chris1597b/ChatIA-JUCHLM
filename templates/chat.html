@@ -6,7 +6,15 @@
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="/static/js/conversation.js"></script>
-<style>.juchlm-action-btn{background:#0056b3;color:#fff;border:none;border-radius:9999px;padding:8px 16px;margin:4px;font-size:14px;cursor:pointer}.juchlm-action-btn:hover{background:#003f87}#action-bar{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-bottom:8px}</style>
+<style>.juchlm-action-btn{background:#0056b3;color:#fff;border:none;border-radius:9999px;padding:8px 16px;margin:4px;font-size:14px;cursor:pointer}.juchlm-action-btn:hover{background:#003f87}#action-bar{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-bottom:8px}
+.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:6px 2px}
+.typing-dots span{width:8px;height:8px;border-radius:50%;background:#0056b3;opacity:.35;animation:typing-bounce 1.2s infinite}
+.typing-dots span:nth-child(2){animation-delay:.15s}
+.typing-dots span:nth-child(3){animation-delay:.3s}
+@keyframes typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.35}30%{transform:translateY(-6px);opacity:1}}
+.type-cursor{display:inline-block;width:8px;height:1.1em;background:#0056b3;vertical-align:text-bottom;margin-left:2px;animation:cursor-blink .8s steps(1) infinite}
+@keyframes cursor-blink{50%{opacity:0}}
+.ai-stage-label{font-size:13px;color:#003f87;font-weight:600}</style>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script id="tailwind-config">
@@ -323,14 +331,9 @@
         // loader html
         aiMsgWrapper.innerHTML = `
             <div class="flex gap-md w-full max-w-[85%] ai-loader">
-                <div class="flex flex-col items-center pt-2">
-                    <div class="loader-dot active"></div>
-                </div>
-                <div class="flex flex-col gap-2 pt-1">
-                    <div class="font-label-md text-label-md text-primary font-semibold flex items-center gap-xs">
-                        <span class="material-symbols-outlined text-[14px] animate-spin">sync</span>
-                        Buscando y generando respuesta...
-                    </div>
+                <div class="surface-glass rounded-2xl rounded-tl-sm px-md py-sm border border-[#e9ecef] shadow-[0_4px_20px_rgba(0,0,0,0.04)]">
+                    <div class="typing-dots"><span></span><span></span><span></span></div>
+                    <div class="ai-stage-label">Analizando pregunta</div>
                 </div>
             </div>
             
@@ -358,8 +361,23 @@
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder("utf-8");
-            let firstChunkReceived = false;
             let rawAiResponse = "";
+            const stage = createStageLoader(aiMsgWrapper.querySelector('.ai-stage-label'));
+            let tw = null, twFinished = false;
+            function ensureTyping() {
+                if (tw) return;
+                stage.stop();
+                loader.classList.add('hidden');
+                contentBox.classList.remove('hidden');
+                contentDiv.innerHTML = '<span class="type-text"></span><span class="type-cursor"></span>';
+                tw = createTypewriter(contentDiv.querySelector('.type-text'));
+            }
+            function finishTyping() {
+                if (twFinished) return; twFinished = true;
+                stage.stop();
+                const renderFinal = () => { contentDiv.innerHTML = marked.parse(rawAiResponse); scrollToBottom(); };
+                if (tw) tw.finish(renderFinal); else renderFinal();
+            }
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -374,13 +392,8 @@
                         try {
                             const payload = JSON.parse(dataStr);
                             
-                            if (!firstChunkReceived) {
-                                firstChunkReceived = true;
-                                loader.classList.add('hidden');
-                                contentBox.classList.remove('hidden');
-                            }
-
                             if (payload.type === 'sources') {
+                                stage.setStage(1);
                                 const sources = payload.data;
                                 // Deduplicate sources
                                 const uniqueSources = [...new Set(sources.map(s => s.source))];
@@ -395,13 +408,15 @@
                                         `;
                                     });
                                 }
+                            } else if (payload.type === 'area') {
+                                stage.setStage(2);
                             } else if (payload.type === 'chunk') {
                                 rawAiResponse += payload.data;
-                                contentDiv.innerHTML = marked.parse(rawAiResponse);
-                                scrollToBottom();
+                                stage.setStage(3);
+                                ensureTyping();
+                                tw.push(payload.data);
                             } else if (payload.type === 'done') {
-                                // finished
-                                scrollToBottom();
+                                finishTyping();
                             }
                         } catch (e) {
                             console.error("Error parsing JSON line", e, dataStr);
@@ -409,10 +424,63 @@
                     }
                 }
             }
+            finishTyping();
         } catch (error) {
             console.error(error);
-            loader.innerHTML = `<span class="text-error">Error al conectar con el servidor.</span>`;
+            stage.stop();
+            if (tw) { tw.cancel(); contentDiv.innerHTML = marked.parse(rawAiResponse); }
+            else { loader.innerHTML = `<span class="text-error">Error al conectar con el servidor.</span>`; }
         }
+    }
+
+    // ===== Etapas RAG + máquina de escribir (solo frontend, RAG intacto) =====
+    const RAG_STAGES = ["Analizando pregunta", "Recuperando evidencia", "Verificando información", "Generando respuesta"];
+
+    // Máquina de escribir: vuelca la cola a ritmo constante aunque la red
+    // entregue todo en ráfaga. onDone se ejecuta al vaciar la cola.
+    function createTypewriter(el, opts) {
+        const speed = (opts && opts.charsPerTick) || 14;
+        const pace = (opts && opts.ms) || 24;
+        let queue = "", timer = null, finished = false, cb = null;
+        function tick() {
+            if (queue.length) {
+                el.textContent += queue.slice(0, speed);
+                queue = queue.slice(speed);
+                scrollToBottom();
+            } else {
+                if (timer) { clearInterval(timer); timer = null; }
+                if (finished) { const f = cb; cb = null; if (f) f(); }
+            }
+        }
+        return {
+            push(t) { queue += String(t); if (!timer) timer = setInterval(tick, pace); },
+            finish(f) { finished = true; cb = f || null; if (!timer) timer = setInterval(tick, pace); },
+            cancel() { if (timer) clearInterval(timer); timer = null; queue = ""; finished = true; }
+        };
+    }
+
+    // Loader de etapas: avanza con eventos reales del backend (sources/area/
+    // chunk) y por temporizador durante el silencio largo de la fase LLM.
+    function createStageLoader(labelEl) {
+        let idx = 0, timer = setInterval(() => {
+            if (idx < RAG_STAGES.length - 1) { idx++; labelEl.textContent = RAG_STAGES[idx]; }
+        }, 9000);
+        labelEl.textContent = RAG_STAGES[0];
+        return {
+            setStage(i) { if (i > idx && i < RAG_STAGES.length) { idx = i; labelEl.textContent = RAG_STAGES[idx]; } },
+            stop() { if (timer) { clearInterval(timer); timer = null; } }
+        };
+    }
+
+    // Burbuja "pensando" para la vía orquestada (respuesta JSON única).
+    function showThinking() {
+        const chatMessages = document.getElementById('chat-messages');
+        const w = document.createElement('div');
+        w.className = 'flex justify-start';
+        w.innerHTML = `<div class="surface-glass rounded-2xl rounded-tl-sm px-md py-sm border border-[#e9ecef]"><div class="typing-dots"><span></span><span></span><span></span></div><div class="ai-stage-label">Analizando pregunta</div></div>`;
+        chatMessages.appendChild(w); scrollToBottom();
+        const stage = createStageLoader(w.querySelector('.ai-stage-label'));
+        return { done() { stage.stop(); w.remove(); } };
     }
 
     // ===== Orquestador ChatJUCHLM (Capability Registry + Session State) =====
@@ -427,26 +495,35 @@
         const chatMessages = document.getElementById('chat-messages');
         const w = document.createElement('div');
         w.className = 'flex justify-start';
-        w.innerHTML = `<div class="surface-glass rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border"><div class="ai-response-content"></div><div class="ai-actions mt-2 flex flex-wrap"></div></div>`;
-        w.querySelector('.ai-response-content').innerHTML = marked.parse(escapeHtml(message));
-        const box = w.querySelector('.ai-actions');
-        (actions||[]).forEach(a => {
-            const b = document.createElement('button');
-            b.className = 'juchlm-action-btn'; b.textContent = a.label;
-            b.onclick = () => {
-                if (a.type === 'download') { window.location.href = (data && data.download_url) || '/api/tramites/constancia-usuario'; return; }
-                addUserBubble(a.label);
-                JUCHLM.postMessage('', a.id).then(renderOrchestrated).catch(() => sendMessageLegacy());
-            };
-            box.appendChild(b);
-        });
-        if (data && data.sources && data.sources.length) {
-            const s = document.createElement('div');
-            s.className = 'text-xs mt-2 opacity-70';
-            s.textContent = 'Fuentes: ' + [...new Set(data.sources.map(x=>x.source))].join(', ');
-            w.querySelector('.surface-glass').appendChild(s);
-        }
+        w.innerHTML = `<div class="surface-glass rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border"><div class="ai-response-content font-body-md text-body-md"></div><div class="ai-actions mt-2 flex flex-wrap"></div><div class="ai-src"></div></div>`;
+        const contentEl = w.querySelector('.ai-response-content');
         chatMessages.appendChild(w); scrollToBottom();
+        const full = message || '';
+        contentEl.innerHTML = '<span class="type-text"></span><span class="type-cursor"></span>';
+        const tw = createTypewriter(contentEl.querySelector('.type-text'), { charsPerTick: full.length > 1800 ? 30 : 14 });
+        tw.push(full);
+        tw.finish(() => {
+            contentEl.innerHTML = marked.parse(escapeHtml(full));
+            const box = w.querySelector('.ai-actions');
+            (actions||[]).forEach(a => {
+                const b = document.createElement('button');
+                b.className = 'juchlm-action-btn'; b.textContent = a.label;
+                b.onclick = () => {
+                    if (a.type === 'download') { window.location.href = (data && data.download_url) || '/api/tramites/constancia-usuario'; return; }
+                    addUserBubble(a.label);
+                    const th = showThinking();
+                    JUCHLM.postMessage('', a.id).then(p => { th.done(); renderOrchestrated(p); }).catch(() => { th.done(); sendMessageLegacy(); });
+                };
+                box.appendChild(b);
+            });
+            if (data && data.sources && data.sources.length) {
+                const s = document.createElement('div');
+                s.className = 'text-xs mt-2 opacity-70';
+                s.textContent = 'Fuentes: ' + [...new Set(data.sources.map(x=>x.source))].join(', ');
+                w.querySelector('.ai-src').appendChild(s);
+            }
+            scrollToBottom();
+        });
     }
     function renderOrchestrated(payload) {
         const r = payload.response;
@@ -464,10 +541,12 @@
         if (!text) return;
         textarea.value=''; textarea.style.height='auto';
         addUserBubble(text);
+        const thinking = showThinking();
         try {
             const payload = await JUCHLM.postMessage(text, null);
+            thinking.done();
             renderOrchestrated(payload);
-        } catch(e) { await sendMessageLegacy(); }
+        } catch(e) { thinking.done(); await sendMessageLegacy(); }
     }
     async function initOrchestrated() {
         try {
