@@ -314,7 +314,23 @@ def dividir_en_frases(texto: str) -> list[str]:
     if not texto:
         return []
     partes = re.split(r"(?<=[\.!?])\s+|\n+", texto)
-    return [p.strip(" -•\t") for p in partes if p.strip(" -•\t")]
+    limpias = [p.strip(" -•\t") for p in partes if p.strip(" -•\t")]
+    # Fix listas numeradas: "1. Operación..." se partía en "1." + resto,
+    # y el fallback parcial dejaba el "1." huérfano colgado al final.
+    # Se fusiona el marcador solo con la frase siguiente.
+    fusionadas: list[str] = []
+    pendiente = ""
+    for p in limpias:
+        if re.fullmatch(r"\d{1,3}[\.\)\:\-]", p.strip()):
+            pendiente = p.strip()
+            continue
+        if pendiente:
+            p = f"{pendiente} {p}".strip()
+            pendiente = ""
+        fusionadas.append(p)
+    if pendiente:
+        fusionadas.append(pendiente)
+    return fusionadas
 
 
 def limpiar_fuentes_generadas(texto: str) -> str:
@@ -1228,6 +1244,14 @@ def _detectar_resumen(question: str) -> bool:
         r"\bhaz un resumen\b", r"\bhazme un resumen\b", r"\bsintetiza\b",
         r"\bsintesis del documento\b", r"\bde que trata\b", r"\bde que se trata\b",
         r"\bresumen ejecutivo\b",
+        # Preguntas abiertas "todo": deben ir a map-reduce del documento
+        # completo, no a los 7 chunks más similares (se recortaban).
+        # No se usa \bcompleto\b solo para no colisionar con
+        # "nombre/apellido completo" del flujo predio.
+        r"\bexplicame todo\b", r"\btodo sobre\b", r"\bdime todo\b",
+        r"\bcuentame todo\b", r"\bcuenta todo\b",
+        r"\binformacion completa\b", r"\bexplicacion completa\b",
+        r"\bdetallado\b", r"\bde forma detallada\b",
     ]
     return any(re.search(p, q) for p in patrones)
 
@@ -3296,7 +3320,16 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
                 },
             )
 
-        claims_validos = [x["claim"] for x in validacion["claims"] if x["ok"]]
+        # Fix parcial: preferir los claims válidos de la respuesta REPARADA
+        # (antes se devolvían los de la original, tirando lo que el repair
+        # sí había salvado) y nunca dejar marcadores de lista huérfanos.
+        claims_rep = [x["claim"] for x in validacion_reparada["claims"] if x["ok"]]
+        claims_orig = [x["claim"] for x in validacion["claims"] if x["ok"]]
+        claims_validos = claims_rep or claims_orig
+        claims_validos = [
+            c for c in claims_validos
+            if not re.fullmatch(r"\d{1,3}[\.\)\:\-]", (c or "").strip())
+        ]
         if claims_validos:
             return (
                 "\n".join(claims_validos),
