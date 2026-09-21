@@ -237,7 +237,7 @@
 
 <!-- Chat Canvas -->
 <div class="flex-1 overflow-y-auto pt-24 px-md md:px-lg flex justify-center scroll-smooth" id="chat-canvas">
-<div class="w-full max-w-[800px] flex flex-col gap-lg pb-[240px]" id="chat-messages">
+<div class="w-full max-w-[800px] flex flex-col gap-lg pb-md" id="chat-messages">
     <!-- Welcome message -->
     <div class="flex justify-start">
         <div class="surface-glass text-on-surface rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border border-[#e9ecef] shadow-[0_4px_20px_rgba(0,0,0,0.04)]">
@@ -247,9 +247,9 @@
 </div>
 </div>
 
-<!-- Input Area -->
-<div class="absolute bottom-0 left-0 w-full bg-gradient-to-t from-surface via-surface to-transparent pt-xl pb-lg px-md md:px-lg flex justify-center z-30 pointer-events-none">
-<div class="w-full max-w-[800px] pointer-events-auto">
+<!-- Input Area (en flujo: nunca tapa las respuestas) -->
+<div class="shrink-0 w-full bg-surface border-t border-outline-variant/30 px-md md:px-lg pt-sm pb-lg flex justify-center z-30">
+<div class="w-full max-w-[800px]">
 <div id="action-bar"></div>
 <div class="bg-surface-container-lowest border border-outline-variant/40 rounded-2xl shadow-[0_12px_40px_rgba(0,86,179,0.08)] p-sm flex items-end gap-sm transition-all focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-surface">
 <button class="p-sm text-outline hover:text-primary transition-colors rounded-full hover:bg-surface-container flex-shrink-0" title="Subir documento" onclick="window.location.href='/documentos'">
@@ -273,7 +273,9 @@
     // Utils
     function scrollToBottom() {
         const canvas = document.getElementById('chat-canvas');
-        canvas.scrollTop = canvas.scrollHeight;
+        requestAnimationFrame(() => {
+            canvas.scrollTo({ top: canvas.scrollHeight, behavior: 'smooth' });
+        });
     }
 
     const textarea = document.getElementById('chat-input');
@@ -332,7 +334,7 @@
                 </div>
             </div>
             
-            <div class="surface-glass text-on-surface rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border border-[#e9ecef] shadow-[0_4px_20px_rgba(0,0,0,0.04)] ai-content-box hidden mb-80">
+            <div class="surface-glass text-on-surface rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border border-[#e9ecef] shadow-[0_4px_20px_rgba(0,0,0,0.04)] ai-content-box hidden mb-40">
                 <div class="font-body-md text-body-md mb-sm ai-response-content"></div>
                 <div class="ai-sources mt-3 flex flex-wrap gap-2"></div>
             </div>
