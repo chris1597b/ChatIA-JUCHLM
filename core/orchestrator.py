@@ -40,6 +40,11 @@ def tramite_menu_actions() -> list[ActionButton]:
     return out
 
 
+def volver_action() -> list[ActionButton]:
+    """Escape hatch: ninguna respuesta puede dejar al usuario sin botones."""
+    return [_btn("volver_menu", "⬅️ Volver al menú", "action")]
+
+
 class ConversationOrchestrator:
     def __init__(self, sessions: InMemorySessionManager, role: str = "USUARIO"):
         self.sessions = sessions
@@ -109,7 +114,7 @@ class ConversationOrchestrator:
             self.sessions.update_context(session.session_id, capability="informacion_predio")
             return AssistantResponse(
                 message="Claro. Para consultar la información registrada del predio, indícame tu nombre y apellido completo.",
-                state=ConversationState.PREDIO_REQUEST_NAME, actions=[], source="sql")
+                state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         if act in ("realizar_tramite",):
             self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
             return AssistantResponse(message="📄 Trámites disponibles:", state=ConversationState.TRAMITE_MENU,
@@ -138,12 +143,12 @@ class ConversationOrchestrator:
         try:
             result = Predio.consultar(msg)
         except DomainValidationError as e:
-            return AssistantResponse(message=str(e), state=ConversationState.PREDIO_REQUEST_NAME, actions=[], source="sql")
+            return AssistantResponse(message=str(e), state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         except DatabaseUnavailableError:
             log.exception("predio sql no disponible")
             Audit.audit(session.session_id, "predio_query", "informacion_predio", {}, "db_unavailable")
             return AssistantResponse(message="No fue posible completar la consulta en este momento.",
-                                     state=ConversationState.PREDIO_REQUEST_NAME, actions=[], source="sql")
+                                     state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         Audit.audit(session.session_id, "predio_query", "informacion_predio", {"nombre": msg}, "ok")
         if not result["found"]:
             self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
@@ -154,7 +159,7 @@ class ConversationOrchestrator:
             self.sessions.set_state(session.session_id, ConversationState.PREDIO_DISAMBIGUATE)
             self.sessions.update_context(session.session_id, candidatos=result["data"])
             return AssistantResponse(message=result["message"], state=ConversationState.PREDIO_DISAMBIGUATE,
-                                     actions=[], data=result, source="sql")
+                                     actions=volver_action(), data=result, source="sql")
         # 1 resultado (§15 + §16)
         self.sessions.set_state(session.session_id, ConversationState.ASK_TRAMITE)
         self.sessions.update_context(session.session_id, predio=result["data"])
@@ -192,4 +197,4 @@ class ConversationOrchestrator:
                                  actions=main_menu_actions(), source="menu")
 
     def _safe(self, session, text: str) -> AssistantResponse:
-        return AssistantResponse(message=text, state=session.state, actions=[], source="orchestrator")
+        return AssistantResponse(message=text, state=session.state, actions=volver_action(), source="orchestrator")

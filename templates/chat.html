@@ -194,7 +194,7 @@
             </a>
 </div>
 <div class="flex-1 overflow-y-auto px-md flex flex-col gap-xs scroll-smooth">
-<a class="flex items-center gap-sm bg-primary-fixed dark:bg-on-primary-fixed-variant text-on-primary-fixed dark:text-primary-fixed border-l-4 border-primary dark:border-primary-fixed-dim px-md py-sm rounded-r-lg group translate-x-1 duration-200" href="/">
+<a class="flex items-center gap-sm bg-primary-fixed dark:bg-on-primary-fixed-variant text-on-primary-fixed dark:text-primary-fixed border-l-4 border-primary dark:border-primary-fixed-dim px-md py-sm rounded-r-lg group translate-x-1 duration-200" href="#" onclick="newChat(event)">
 <span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">add_comment</span>
 <span class="font-body-sm text-body-sm font-semibold">Nuevo Chat</span>
 </a>
@@ -553,6 +553,19 @@
             const payload = await JUCHLM.postMessage('', null);
             renderOrchestrated(payload);
         } catch(e) {}
+    }
+    async function newChat(e) {
+        if (e) e.preventDefault();
+        const sid = (window.JUCHLM && JUCHLM.store.session_id) || localStorage.getItem("juchlm_sid");
+        try {
+            await fetch('/api/conversation/reset', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sid, message: '', action_id: null })
+            });
+        } catch(err) {}
+        try { localStorage.removeItem("juchlm_sid"); } catch(err) {}
+        if (window.JUCHLM) JUCHLM.store.session_id = null;
+        window.location.reload();
     }
     initOrchestrated();
 
