@@ -1,0 +1,41 @@
+{
+  "version": "1.0-mvp",
+  "capabilities": [
+    {
+      "id": "informacion_junta",
+      "label": "📚 Información de la Junta",
+      "icon": "📚",
+      "type": "menu",
+      "enabled": true,
+      "description": "Consultas documentales institucionales vía RAG V11",
+      "children": [
+        {
+          "id": "consulta_documental",
+          "label": "Consultar información",
+          "type": "rag",
+          "action": "rag_query",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "id": "informacion_predio",
+      "label": "🏠 Información del predio",
+      "icon": "🏠",
+      "type": "workflow",
+      "enabled": true,
+      "description": "Consulta estructurada en SQL Server por nombre completo",
+      "action": "consultar_predio"
+    },
+    {
+      "id": "tramite_constancia_usuario",
+      "label": "📄 Constancia de usuario",
+      "icon": "📄",
+      "type": "tramite",
+      "enabled": true,
+      "description": "Descarga del formato institucional",
+      "action": "descargar_constancia_usuario",
+      "file": "constancia_usuario.pdf"
+    }
+  ]
+}

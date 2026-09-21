@@ -5,6 +5,8 @@
 <title>RAG IA - JUCHLM</title>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="/static/js/conversation.js"></script>
+<style>.juchlm-action-btn{background:#0056b3;color:#fff;border:none;border-radius:9999px;padding:8px 16px;margin:4px;font-size:14px;cursor:pointer}.juchlm-action-btn:hover{background:#003f87}#action-bar{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-bottom:8px}</style>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script id="tailwind-config">
@@ -248,6 +250,7 @@
 <!-- Input Area -->
 <div class="absolute bottom-0 left-0 w-full bg-gradient-to-t from-surface via-surface to-transparent pt-xl pb-lg px-md md:px-lg flex justify-center z-30 pointer-events-none">
 <div class="w-full max-w-[800px] pointer-events-auto">
+<div id="action-bar"></div>
 <div class="bg-surface-container-lowest border border-outline-variant/40 rounded-2xl shadow-[0_12px_40px_rgba(0,86,179,0.08)] p-sm flex items-end gap-sm transition-all focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-surface">
 <button class="p-sm text-outline hover:text-primary transition-colors rounded-full hover:bg-surface-container flex-shrink-0" title="Subir documento" onclick="window.location.href='/documentos'">
 <span class="material-symbols-outlined">add</span>
@@ -291,7 +294,7 @@
 
     document.getElementById('send-btn').addEventListener('click', sendMessage);
 
-    async function sendMessage() {
+    async function sendMessageLegacy() {
         const text = textarea.value.trim();
         if (!text) return;
 
@@ -409,6 +412,68 @@
             loader.innerHTML = `<span class="text-error">Error al conectar con el servidor.</span>`;
         }
     }
+
+    // ===== Orquestador ChatJUCHLM (Capability Registry + Session State) =====
+    function addUserBubble(text) {
+        const chatMessages = document.getElementById('chat-messages');
+        const d = document.createElement('div');
+        d.className = 'flex justify-end';
+        d.innerHTML = `<div class="bg-primary text-on-primary rounded-2xl rounded-tr-sm px-md py-sm max-w-[85%]"><p>${escapeHtml(text).replace(/\n/g,'<br>')}</p></div>`;
+        chatMessages.appendChild(d); scrollToBottom();
+    }
+    function addAssistantBubble(message, actions, data) {
+        const chatMessages = document.getElementById('chat-messages');
+        const w = document.createElement('div');
+        w.className = 'flex justify-start';
+        w.innerHTML = `<div class="surface-glass rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border"><div class="ai-response-content"></div><div class="ai-actions mt-2 flex flex-wrap"></div></div>`;
+        w.querySelector('.ai-response-content').innerHTML = marked.parse(escapeHtml(message));
+        const box = w.querySelector('.ai-actions');
+        (actions||[]).forEach(a => {
+            const b = document.createElement('button');
+            b.className = 'juchlm-action-btn'; b.textContent = a.label;
+            b.onclick = () => {
+                if (a.type === 'download') { window.location.href = (data && data.download_url) || '/api/tramites/constancia-usuario'; return; }
+                addUserBubble(a.label);
+                JUCHLM.postMessage('', a.id).then(renderOrchestrated).catch(() => sendMessageLegacy());
+            };
+            box.appendChild(b);
+        });
+        if (data && data.sources && data.sources.length) {
+            const s = document.createElement('div');
+            s.className = 'text-xs mt-2 opacity-70';
+            s.textContent = 'Fuentes: ' + [...new Set(data.sources.map(x=>x.source))].join(', ');
+            w.querySelector('.surface-glass').appendChild(s);
+        }
+        chatMessages.appendChild(w); scrollToBottom();
+    }
+    function renderOrchestrated(payload) {
+        const r = payload.response;
+        addAssistantBubble(r.message, r.actions, r.data);
+        const bar = document.getElementById('action-bar');
+        if (bar && r.actions && r.actions.length && (r.state === 'MAIN_MENU' || r.state === 'TRAMITE_MENU')) {
+            JUCHLM.renderActions(bar, r.actions, (a) => {
+                addUserBubble(a.label);
+                JUCHLM.postMessage('', a.id).then(renderOrchestrated).catch(()=>{});
+            });
+        } else if (bar && r.state !== 'MAIN_MENU' && r.state !== 'TRAMITE_MENU') { bar.innerHTML = ''; }
+    }
+    async function sendMessage() {
+        const text = textarea.value.trim();
+        if (!text) return;
+        textarea.value=''; textarea.style.height='auto';
+        addUserBubble(text);
+        try {
+            const payload = await JUCHLM.postMessage(text, null);
+            renderOrchestrated(payload);
+        } catch(e) { await sendMessageLegacy(); }
+    }
+    async function initOrchestrated() {
+        try {
+            const payload = await JUCHLM.postMessage('', null);
+            renderOrchestrated(payload);
+        } catch(e) {}
+    }
+    initOrchestrated();
 
     function escapeHtml(unsafe) {
         return (unsafe||"").toString()
