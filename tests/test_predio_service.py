@@ -35,3 +35,47 @@ def test_db_error_es_seguro():
         raise DatabaseUnavailableError("down")
     with pytest.raises(DatabaseUnavailableError):
         P.consultar("Juan Perez Lopez", repository=boom)
+
+
+# ---------- Padrón por DNI ----------
+
+def _fila_dni(nombre="El Tablazo", codigo="CR-001", area=4.5):
+    return {"apellido paterno": "Perez", "apellido materno": "Lopez",
+            "nombres": "Juan", "nombre del predio": nombre, "area": area,
+            "canal": "L1", "codigo de riego": codigo, "uc_actual": "UC-9",
+            "regimen": "Licencia", "estado": "Activo", "comision": "Chancay"}
+
+
+def test_dni_cero():
+    out = P.consultar_por_dni("32104221", repository=lambda d: [])
+    assert out["count"] == 0 and out["found"] is False
+
+
+def test_dni_un_predio_formatea_sin_llm():
+    out = P.consultar_por_dni("32104221", repository=lambda d: [_fila_dni()])
+    assert out["count"] == 1
+    assert "32104221" in out["message"] and "CR-001" in out["message"]
+    assert "4.50 ha" in out["message"] and "Juan Perez Lopez" in out["message"]
+
+
+def test_dni_multiples_lista_todos():
+    out = P.consultar_por_dni("32104221",
+                              repository=lambda d: [_fila_dni("A", "CR-1"), _fila_dni("B", "CR-2")])
+    assert out["count"] == 2
+    assert "Predios registrados (2)" in out["message"]
+    assert "CR-1" in out["message"] and "CR-2" in out["message"]
+
+
+def test_dni_invalido():
+    with pytest.raises(DomainValidationError):
+        P.consultar_por_dni("123", repository=lambda d: [])
+    # tolera puntos/guiones al escribir
+    out = P.consultar_por_dni("32.104.221", repository=lambda d: [])
+    assert out["count"] == 0
+
+
+def test_dni_db_error_es_seguro():
+    def boom(d):
+        raise DatabaseUnavailableError("down")
+    with pytest.raises(DatabaseUnavailableError):
+        P.consultar_por_dni("32104221", repository=boom)

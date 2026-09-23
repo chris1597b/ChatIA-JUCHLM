@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from core.exceptions import DatabaseUnavailableError
-from security.validation import validate_nombre_completo
+from security.validation import validate_dni, validate_nombre_completo
 
 log = logging.getLogger("application")
 
@@ -62,3 +62,57 @@ def consultar(nombre: str, repository=None) -> dict:
             "message": ("Encontré más de un registro con ese nombre.\n"
                         "Necesito un dato adicional para identificar correctamente el predio "
                         "(p. ej. código de predio o sector).")}
+
+
+# ---------- Padrón por DNI (flujo real) ----------
+
+def _mostrar(v) -> str:
+    """El SP usa 'No encontrado' como centinela de NULL; en pantalla se ve '—'."""
+    if v is None:
+        return "—"
+    s = str(v).strip()
+    return "—" if (not s or s.lower() == "no encontrado") else s
+
+
+def _titular(fila: dict) -> str:
+    partes = [_mostrar(fila.get(k)) for k in ("nombres", "apellido paterno", "apellido materno")]
+    return " ".join(p for p in partes if p != "—") or "—"
+
+
+def _formatear_predio_dni(fila: dict, idx: int) -> str:
+    area = fila.get("area")
+    try:
+        area_txt = f"{float(area):.2f} ha" if area is not None else "—"
+    except (TypeError, ValueError):
+        area_txt = _mostrar(area)
+    return (
+        f"{idx}) {_mostrar(fila.get('nombre del predio'))}\n"
+        f"   🏷️ Código de riego: {_mostrar(fila.get('codigo de riego'))}\n"
+        f"   📐 Área: {area_txt}\n"
+        f"   🚰 Canal: {_mostrar(fila.get('canal'))} | Comisión: {_mostrar(fila.get('comision'))}\n"
+        f"   📋 Régimen: {_mostrar(fila.get('regimen'))} | UC: {_mostrar(fila.get('uc_actual'))} | Estado: {_mostrar(fila.get('estado'))}"
+    )
+
+
+def consultar_por_dni(dni: str, repository=None) -> dict:
+    """Casos 0 / 1..N. Con DNI, N filas = N predios del titular: se listan
+    todos (no es ambigüedad). repository inyectable para tests."""
+    dni_ok = validate_dni(dni)
+    repo = repository or __import__("database.repositories.predio_repository",
+                                    fromlist=["consultar_por_dni"]).consultar_por_dni
+    try:
+        filas = repo(dni_ok)
+    except DatabaseUnavailableError:
+        raise
+    except Exception:
+        log.exception("predio consultar_por_dni falló")
+        raise DatabaseUnavailableError("Error consultando predio.")
+    if not filas:
+        return {"found": False, "count": 0, "data": None,
+                "message": "No encontré predios registrados para ese DNI."}
+    titular = _titular(filas[0])
+    bloque = "\n\n".join(_formatear_predio_dni(f, i) for i, f in enumerate(filas, 1))
+    titulo = "Predio registrado (1)" if len(filas) == 1 else f"Predios registrados ({len(filas)})"
+    return {"found": True, "count": len(filas),
+            "data": {"dni": dni_ok, "titular": titular, "predios": filas},
+            "message": (f"🏠 {titulo}\n\n👤 Titular:\n{titular}\n🪪 DNI: {dni_ok}\n\n{bloque}")}

@@ -22,6 +22,15 @@ def validate_nombre_completo(nombre: str) -> str:
     return nombre
 
 
+def validate_dni(dni: str) -> str:
+    """DNI peruano: exactamente 8 dígitos. Se toleran espacios/puntos/guiones
+    al escribirlo, pero a SQL viaja solo el número (parametrizado)."""
+    d = re.sub(r"[\s.\-]", "", str(dni or ""))
+    if not re.fullmatch(r"\d{8}", d):
+        raise DomainValidationError("Indícame tu número de DNI (8 dígitos).")
+    return d
+
+
 def validate_capability_id(cap_id: str) -> str:
     cap_id = (cap_id or "").strip()
     if not _CAP_RE.match(cap_id):

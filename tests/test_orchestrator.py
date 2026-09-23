@@ -16,12 +16,13 @@ def test_start_devuelve_menu():
     assert any(a.id == "informacion_predio" for a in resp.actions)
 
 
-def test_boton_predio_pide_nombre():
+def test_boton_predio_pide_dni():
     o = _orc()
     resp, sid = o.handle(None, "", None)
     resp2, _ = o.handle(sid, "", "informacion_predio")
     assert resp2.state == ConversationState.PREDIO_REQUEST_NAME
-    assert "nombre y apellido" in resp2.message.lower()
+    assert "dni" in resp2.message.lower()
+    assert any(a.id == "volver_menu" for a in resp2.actions)
 
 
 def test_accion_invalida_rechazada():

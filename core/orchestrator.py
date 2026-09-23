@@ -113,7 +113,7 @@ class ConversationOrchestrator:
             self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
             self.sessions.update_context(session.session_id, capability="informacion_predio")
             return AssistantResponse(
-                message="Claro. Para consultar la información registrada del predio, indícame tu nombre y apellido completo.",
+                message="Claro. Para consultar la información registrada del predio, indícame tu número de DNI (8 dígitos).",
                 state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         if act in ("realizar_tramite",):
             self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
@@ -141,7 +141,7 @@ class ConversationOrchestrator:
     def _handle_predio_nombre(self, session, msg: str) -> AssistantResponse:
         from services import predio_service as Predio
         try:
-            result = Predio.consultar(msg)
+            result = Predio.consultar_por_dni(msg)
         except DomainValidationError as e:
             return AssistantResponse(message=str(e), state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         except DatabaseUnavailableError:
@@ -149,12 +149,20 @@ class ConversationOrchestrator:
             Audit.audit(session.session_id, "predio_query", "informacion_predio", {}, "db_unavailable")
             return AssistantResponse(message="No fue posible completar la consulta en este momento.",
                                      state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
-        Audit.audit(session.session_id, "predio_query", "informacion_predio", {"nombre": msg}, "ok")
+        Audit.audit(session.session_id, "predio_query", "informacion_predio", {"documento": msg}, "ok")
         if not result["found"]:
             self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
             return AssistantResponse(message=result["message"], state=ConversationState.PREDIO_REQUEST_NAME,
-                                     actions=[_btn("volver_menu", "⬅️ Volver al menú", "action")],
+                                     actions=volver_action(),
                                      data=result, source="sql")
+        # Padrón por DNI: N filas = N predios del mismo titular → se listan
+        # todos y se ofrece trámite (no es ambigüedad como en flujo por nombre).
+        if isinstance(result.get("data"), dict) and "dni" in result["data"]:
+            self.sessions.set_state(session.session_id, ConversationState.ASK_TRAMITE)
+            self.sessions.update_context(session.session_id, predio=result["data"])
+            return AssistantResponse(message=result["message"] + "\n\n¿Deseas realizar un trámite?",
+                                     state=ConversationState.ASK_TRAMITE,
+                                     actions=ask_tramite_actions(), data=result, source="sql")
         if result["count"] > 1:
             self.sessions.set_state(session.session_id, ConversationState.PREDIO_DISAMBIGUATE)
             self.sessions.update_context(session.session_id, candidatos=result["data"])

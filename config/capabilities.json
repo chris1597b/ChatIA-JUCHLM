@@ -24,7 +24,7 @@
       "icon": "🏠",
       "type": "workflow",
       "enabled": true,
-      "description": "Consulta estructurada en SQL Server por nombre completo",
+      "description": "Consulta de predios del padrón en SQL Server por DNI",
       "action": "consultar_predio"
     },
     {
