@@ -30,8 +30,7 @@ def main_menu_actions() -> list[ActionButton]:
 
 def ask_tramite_actions() -> list[ActionButton]:
     return [_btn("realizar_tramite", "✅ Sí, realizar trámite", "action"),
-            _btn("finalizar", "❌ No, por ahora", "action"),
-            _btn("ver_mis_predios", "📋 Ver mis predios", "action")]
+            _btn("finalizar", "❌ No, por ahora", "action")]
 
 
 def tramite_menu_actions() -> list[ActionButton]:
@@ -71,7 +70,7 @@ class ConversationOrchestrator:
                 V.validate_capability_id(act)
             except DomainValidationError:
                 return self._safe(session, "Acción no válida."), session.session_id
-            if not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu", "ver_mis_predios"):
+            if not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu"):
                 Audit.audit(session.session_id, "unknown_action", act, {"action": act}, "rejected")
                 return self._safe(session, "Esa función aún no está disponible."), session.session_id
             if not AuthZ.can_access(act, self.role):
@@ -120,16 +119,6 @@ class ConversationOrchestrator:
             self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
             return AssistantResponse(message="📄 Trámites disponibles:", state=ConversationState.TRAMITE_MENU,
                                      actions=tramite_menu_actions(), source="tramite")
-        if act in ("ver_mis_predios",):
-            ctx = self.sessions.get_or_create(session.session_id).context
-            predio = ctx.get("predio")
-            if not predio or not predio.get("predios"):
-                return self._main(session, "Aún no hay una consulta de predio. Elige una opción.")
-            self.sessions.set_state(session.session_id, ConversationState.ASK_TRAMITE)
-            return AssistantResponse(
-                message=ctx.get("predio_message", "Tus predios registrados:"),
-                state=ConversationState.ASK_TRAMITE,
-                actions=ask_tramite_actions(), data=predio, source="sql")
         if act in ("tramite_constancia_usuario", "descargar_constancia_usuario", "constancia_usuario"):
             self.sessions.set_state(session.session_id, ConversationState.CONSTANCIA_USUARIO)
             return AssistantResponse(
