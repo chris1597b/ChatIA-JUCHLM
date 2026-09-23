@@ -85,12 +85,18 @@ def _formatear_predio_dni(fila: dict, idx: int) -> str:
         area_txt = f"{float(area):.2f} ha" if area is not None else "—"
     except (TypeError, ValueError):
         area_txt = _mostrar(area)
+    estado = _mostrar(fila.get("estado"))
+    punto = "🟢" if estado.lower() == "activo" else ("🔴" if estado.lower() == "desactivo" else "⚪")
+    # Tarjeta por predio: un campo por fila.
     return (
-        f"{idx}) {_mostrar(fila.get('nombre del predio'))}\n"
-        f"   🏷️ Código de riego: {_mostrar(fila.get('codigo de riego'))}\n"
-        f"   📐 Área: {area_txt}\n"
-        f"   🚰 Canal: {_mostrar(fila.get('canal'))} | Comisión: {_mostrar(fila.get('comision'))}\n"
-        f"   📋 Régimen: {_mostrar(fila.get('regimen'))} | UC: {_mostrar(fila.get('uc_actual'))} | Estado: {_mostrar(fila.get('estado'))}"
+        f"🌾 Predio {idx} — {_mostrar(fila.get('nombre del predio'))}\n"
+        f"🏷️ Código de riego: {_mostrar(fila.get('codigo de riego'))}\n"
+        f"📐 Área: {area_txt}\n"
+        f"🚰 Canal: {_mostrar(fila.get('canal'))}\n"
+        f"🏛️ Comisión: {_mostrar(fila.get('comision'))}\n"
+        f"📋 Régimen: {_mostrar(fila.get('regimen'))}\n"
+        f"🔖 UC: {_mostrar(fila.get('uc_actual'))}\n"
+        f"{punto} Estado: {estado}"
     )
 
 

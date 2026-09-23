@@ -14,7 +14,17 @@
 @keyframes typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.35}30%{transform:translateY(-6px);opacity:1}}
 .type-cursor{display:inline-block;width:8px;height:1.1em;background:#0056b3;vertical-align:text-bottom;margin-left:2px;animation:cursor-blink .8s steps(1) infinite}
 @keyframes cursor-blink{50%{opacity:0}}
-.ai-stage-label{font-size:13px;color:#003f87;font-weight:600}</style>
+.ai-stage-label{font-size:13px;color:#003f87;font-weight:600}
+.predio-hello{font-size:14px;margin-bottom:8px}
+.predio-hello b{color:#003f87}
+.predio-group{background:#eef4ff;border:1px solid #d7e2ff;border-radius:14px;padding:12px;box-shadow:0 2px 10px rgba(0,63,135,.06)}
+.predio-group-head{font-weight:800;color:#001a40;font-size:14px;margin-bottom:4px}
+.predio-group-sub{font-size:12.5px;color:#424752;margin-bottom:4px}
+.predio-item{background:#fff;border:1px solid #e2e7f0;border-radius:12px;padding:10px 12px;margin:8px 0}
+.predio-item-title{font-weight:800;font-size:13.5px;color:#001a40;margin-bottom:4px}
+.predio-row{font-size:13px;color:#333;padding:1px 0}
+.predio-row b{font-weight:600;color:#191c1d}
+.predio-ask{font-style:italic;font-size:13.5px;color:#424752;margin-top:8px}</style>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script id="tailwind-config">
@@ -491,6 +501,40 @@
         d.innerHTML = `<div class="bg-primary text-on-primary rounded-2xl rounded-tr-sm px-md py-sm max-w-[85%]"><p>${escapeHtml(text).replace(/\n/g,'<br>')}</p></div>`;
         chatMessages.appendChild(d); scrollToBottom();
     }
+    // Tarjetas modernas por predio (usa data estructurada del backend; el
+    // texto plano sigue existiendo como fallback para otros clientes).
+    function renderPredios(data) {
+        const preds = data.predios || [];
+        const val = (p, k) => {
+            const v = (p[k] == null) ? '' : String(p[k]).trim();
+            return (!v || v.toLowerCase() === 'no encontrado') ? '—' : escapeHtml(v);
+        };
+        const row = (icon, label, v) => `<div class="predio-row">${icon} ${label}: <b>${v}</b></div>`;
+        let h = `<div class="predio-hello">Hola <b>${escapeHtml(data.titular || '—')}</b>.<br>He encontrado tus predios registrados:</div>`;
+        h += `<div class="predio-group">`
+            + `<div class="predio-group-head">🏠 Predios registrados (${preds.length})</div>`
+            + `<div class="predio-group-sub">🧑‍🌾 Titular: <b>${escapeHtml(data.titular || '—')}</b><br>🪪 DNI: ${escapeHtml(data.dni || '')}</div>`;
+        preds.forEach((p, i) => {
+            let areaTxt = '—';
+            try { areaTxt = (p.area == null || p.area === '') ? '—' : (parseFloat(p.area).toFixed(2) + ' ha'); }
+            catch (e) { areaTxt = val(p, 'area'); }
+            if (areaTxt === 'NaN ha') areaTxt = val(p, 'area');
+            const est = val(p, 'estado'), sl = est.toLowerCase();
+            const dot = sl === 'activo' ? '🟢' : (sl === 'desactivo' ? '🔴' : '⚪');
+            h += `<div class="predio-item">`
+                + `<div class="predio-item-title">🌾 Predio ${i + 1}: ${val(p, 'nombre del predio')}</div>`
+                + row('🏷️', 'Código de riego', val(p, 'codigo de riego'))
+                + row('📐', 'Área', areaTxt)
+                + row('🚰', 'Canal', val(p, 'canal'))
+                + row('🏛️', 'Comisión', val(p, 'comision'))
+                + row('📋', 'Régimen', val(p, 'regimen'))
+                + row('🔖', 'UC', val(p, 'uc_actual'))
+                + row(dot, 'Estado', est)
+                + `</div>`;
+        });
+        h += `</div><div class="predio-ask">¿Deseas realizar un trámite?</div>`;
+        return h;
+    }
     function addAssistantBubble(message, actions, data) {
         const chatMessages = document.getElementById('chat-messages');
         const w = document.createElement('div');
@@ -503,7 +547,9 @@
         const tw = createTypewriter(contentEl.querySelector('.type-text'), { charsPerTick: full.length > 1800 ? 30 : 14 });
         tw.push(full);
         tw.finish(() => {
-            contentEl.innerHTML = marked.parse(escapeHtml(full));
+            contentEl.innerHTML = (data && data.predios && data.predios.length)
+                ? renderPredios(data)
+                : marked.parse(escapeHtml(full));
             const box = w.querySelector('.ai-actions');
             (actions||[]).forEach(a => {
                 const b = document.createElement('button');
