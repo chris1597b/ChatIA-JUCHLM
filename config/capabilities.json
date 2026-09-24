@@ -29,7 +29,7 @@
     },
     {
       "id": "tramite_constancia_usuario",
-      "label": "📄 Constancia de usuario",
+      "label": "📄 Constancia de red de riego",
       "icon": "📄",
       "type": "tramite",
       "enabled": true,

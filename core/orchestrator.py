@@ -141,7 +141,7 @@ class ConversationOrchestrator:
         if act in ("tramite_constancia_usuario", "descargar_constancia_usuario", "constancia_usuario"):
             self.sessions.set_state(session.session_id, ConversationState.CONSTANCIA_USUARIO)
             return AssistantResponse(
-                message="📄 Constancia de usuario\n\nPuedes descargar el formato institucional aquí:",
+                message="📄 Constancia de red de riego\n\nPuedes descargar el formato institucional aquí:",
                 state=ConversationState.CONSTANCIA_USUARIO,
                 actions=[_btn("descargar_constancia_usuario", "⬇️ Descargar constancia", "download"),
                          _btn("volver_menu", "⬅️ Volver al menú", "action")],

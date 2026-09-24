@@ -32,5 +32,5 @@ def resolve_tramite(action_id: str) -> Path:
 
 
 def list_tramites() -> list[dict]:
-    return [{"id": "tramite_constancia_usuario", "label": "📄 Constancia de usuario", "type": "download",
+    return [{"id": "tramite_constancia_usuario", "label": "📄 Constancia de red de riego", "type": "download",
              "available": (TRAMITES_DIR / "constancia_usuario.pdf").is_file()}]
