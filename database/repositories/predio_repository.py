@@ -33,12 +33,21 @@ def consultar_por_nombre(nombre: str) -> list[dict]:
 
 
 def consultar_por_dni(dni: str) -> list[dict]:
-    """Padrón real. Parametrizado (?), nunca f-string. Una fila por predio;
-    las columnas vienen con espacios ('apellido paterno', 'codigo de riego')."""
+    """Padrón real por DNI. Parametrizado (?), nunca f-string."""
+    return _ejecutar_padron(dni, None)
+
+
+def consultar_por_codigo(codigo: str) -> list[dict]:
+    """Padrón real por código de riego (@Dni va NULL)."""
+    return _ejecutar_padron(None, codigo)
+
+
+def _ejecutar_padron(dni: str | None, codigo: str | None) -> list[dict]:
+    """Una fila por predio; columnas con espacios ('codigo de riego')."""
     cn = get_connection()
     try:
         cur = cn.cursor()
-        cur.execute(SP_OBTENER_PREDIOS_POR_DNI, (dni,))
+        cur.execute(SP_OBTENER_PREDIOS_POR_DNI, (dni, codigo))
         cols = [c[0] for c in cur.description] if cur.description else []
         rows = cur.fetchall() if cols else []
         out = []

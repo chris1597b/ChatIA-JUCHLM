@@ -79,3 +79,22 @@ def test_dni_db_error_es_seguro():
         raise DatabaseUnavailableError("down")
     with pytest.raises(DatabaseUnavailableError):
         P.consultar_por_dni("32104221", repository=boom)
+
+
+# ---------- Padrón por código de riego ----------
+
+def test_codigo_un_predio():
+    out = P.consultar_por_codigo("MOZAVI414", repository=lambda c: [_fila_dni(codigo="MOZAVI414")])
+    assert out["count"] == 1
+    assert out["data"]["codigo"] == "MOZAVI414"
+    assert "MOZAVI414" in out["message"]
+
+
+def test_codigo_cero_e_invalido():
+    out = P.consultar_por_codigo("XXX999", repository=lambda c: [])
+    assert out["found"] is False
+    with pytest.raises(DomainValidationError):
+        P.consultar_por_codigo("ab", repository=lambda c: [])
+    # minúsculas se normalizan
+    out2 = P.consultar_por_codigo("mozavi414", repository=lambda c: [_fila_dni()])
+    assert out2["data"]["codigo"] == "MOZAVI414"

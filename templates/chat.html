@@ -513,7 +513,9 @@
         let h = `<div class="predio-hello">Hola <b>${escapeHtml(data.titular || '—')}</b>.<br>He encontrado tus predios registrados:</div>`;
         h += `<div class="predio-group">`
             + `<div class="predio-group-head">🏠 Predios registrados (${preds.length})</div>`
-            + `<div class="predio-group-sub">🧑‍🌾 Titular: <b>${escapeHtml(data.titular || '—')}</b><br>🪪 DNI: ${escapeHtml(data.dni || '')}</div>`;
+            + `<div class="predio-group-sub">🧑‍🌾 Titular: <b>${escapeHtml(data.titular || '—')}</b><br>${
+                data.dni ? '🪪 DNI: ' + escapeHtml(data.dni) : (data.codigo ? '🏷️ Código: ' + escapeHtml(data.codigo) : '')
+            }</div>`;
         preds.forEach((p, i) => {
             let areaTxt = '—';
             try { areaTxt = (p.area == null || p.area === '') ? '—' : (parseFloat(p.area).toFixed(2) + ' ha'); }

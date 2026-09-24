@@ -31,6 +31,14 @@ def validate_dni(dni: str) -> str:
     return d
 
 
+def validate_codigo_riego(codigo: str) -> str:
+    """Código de riego: letras/números/guiones, 3-20 chars. Viaja parametrizado."""
+    c = re.sub(r"\s+", "", str(codigo or "")).upper()
+    if not re.fullmatch(r"[A-Z0-9\-]{3,20}", c):
+        raise DomainValidationError("Indícame el código de riego (p. ej. MOZAVI414).")
+    return c
+
+
 def validate_capability_id(cap_id: str) -> str:
     cap_id = (cap_id or "").strip()
     if not _CAP_RE.match(cap_id):

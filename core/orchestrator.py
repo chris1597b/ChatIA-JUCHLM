@@ -70,7 +70,8 @@ class ConversationOrchestrator:
                 V.validate_capability_id(act)
             except DomainValidationError:
                 return self._safe(session, "Acción no válida."), session.session_id
-            if not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu"):
+            if not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu",
+                                                                 "predio_por_dni", "predio_por_codigo"):
                 Audit.audit(session.session_id, "unknown_action", act, {"action": act}, "rejected")
                 return self._safe(session, "Esa función aún no está disponible."), session.session_id
             if not AuthZ.can_access(act, self.role):
@@ -78,6 +79,8 @@ class ConversationOrchestrator:
             return self._handle_action(session, act), session.session_id
 
         # 2) RESPUESTA A SOLICITUD DE DATOS (depende del estado, no del LLM §9)
+        if session.state == ConversationState.PREDIO_ELEGIR_METODO:
+            return self._handle_elegir_metodo(session, msg), session.session_id
         if session.state == ConversationState.PREDIO_REQUEST_NAME:
             return self._handle_predio_nombre(session, msg), session.session_id
         if session.state == ConversationState.ASK_TRAMITE:
@@ -110,10 +113,26 @@ class ConversationOrchestrator:
                 state=ConversationState.RAG_QUERY,
                 actions=[_btn("volver_menu", "⬅️ Volver al menú", "action")], source="menu")
         if act in ("informacion_predio", "consultar_predio"):
-            self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
+            self.sessions.set_state(session.session_id, ConversationState.PREDIO_ELEGIR_METODO)
             self.sessions.update_context(session.session_id, capability="informacion_predio")
             return AssistantResponse(
+                message="🏠 Información del predio\n\n¿Cómo deseas buscar?",
+                state=ConversationState.PREDIO_ELEGIR_METODO,
+                actions=[_btn("predio_por_dni", "🪪 Buscar por DNI", "action"),
+                         _btn("predio_por_codigo", "🏷️ Buscar por código de riego", "action"),
+                         _btn("volver_menu", "⬅️ Volver al menú", "action")],
+                source="menu")
+        if act in ("predio_por_dni",):
+            self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
+            self.sessions.update_context(session.session_id, metodo="dni")
+            return AssistantResponse(
                 message="Claro. Para consultar la información registrada del predio, indícame tu número de DNI (8 dígitos).",
+                state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
+        if act in ("predio_por_codigo",):
+            self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
+            self.sessions.update_context(session.session_id, metodo="codigo")
+            return AssistantResponse(
+                message="Claro. Indícame el código de riego del predio (p. ej. MOXXXX4).",
                 state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         if act in ("realizar_tramite",):
             self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
@@ -138,10 +157,36 @@ class ConversationOrchestrator:
         return self._safe(session, "Esa función aún no está disponible.")
 
     # ---------- predio ----------
+    def _handle_elegir_metodo(self, session, msg: str) -> AssistantResponse:
+        """Si escribe en vez de pulsar: 8 dígitos -> DNI, código -> riego.
+        El dato escrito se procesa directo, sin pedirlo de nuevo."""
+        for metodo, validador in (("dni", V.validate_dni), ("codigo", V.validate_codigo_riego)):
+            try:
+                validador(msg)
+                self.sessions.update_context(session.session_id, metodo=metodo)
+                self.sessions.set_state(session.session_id, ConversationState.PREDIO_REQUEST_NAME)
+                return self._handle_predio_nombre(session, msg)
+            except DomainValidationError:
+                continue
+        # Re-preguntar conservando los 2 botones (el mensaje llega vacío al
+        # reanudar sesiones, así que no se exige dato aquí).
+        self.sessions.set_state(session.session_id, ConversationState.PREDIO_ELEGIR_METODO)
+        return AssistantResponse(
+            message="Elige cómo buscar: por DNI (8 dígitos) o por código de riego.",
+            state=ConversationState.PREDIO_ELEGIR_METODO,
+            actions=[_btn("predio_por_dni", "🪪 Buscar por DNI", "action"),
+                     _btn("predio_por_codigo", "🏷️ Buscar por código de riego", "action"),
+                     _btn("volver_menu", "⬅️ Volver al menú", "action")],
+            source="menu")
+
     def _handle_predio_nombre(self, session, msg: str) -> AssistantResponse:
         from services import predio_service as Predio
+        metodo = self.sessions.get_or_create(session.session_id).context.get("metodo", "dni")
         try:
-            result = Predio.consultar_por_dni(msg)
+            if metodo == "codigo":
+                result = Predio.consultar_por_codigo(msg)
+            else:
+                result = Predio.consultar_por_dni(msg)
         except DomainValidationError as e:
             return AssistantResponse(message=str(e), state=ConversationState.PREDIO_REQUEST_NAME, actions=volver_action(), source="sql")
         except DatabaseUnavailableError:
@@ -155,9 +200,9 @@ class ConversationOrchestrator:
             return AssistantResponse(message=result["message"], state=ConversationState.PREDIO_REQUEST_NAME,
                                      actions=volver_action(),
                                      data=result, source="sql")
-        # Padrón por DNI: N filas = N predios del mismo titular → se listan
+        # Padrón (DNI o código): N filas = N predios del titular → se listan
         # todos y se ofrece trámite (no es ambigüedad como en flujo por nombre).
-        if isinstance(result.get("data"), dict) and "dni" in result["data"]:
+        if isinstance(result.get("data"), dict) and "predios" in result["data"]:
             self.sessions.set_state(session.session_id, ConversationState.ASK_TRAMITE)
             msg_final = result["message"] + "\n\n¿Deseas realizar un trámite?"
             self.sessions.update_context(session.session_id, predio=result["data"], predio_message=msg_final)

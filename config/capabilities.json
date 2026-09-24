@@ -24,7 +24,7 @@
       "icon": "🏠",
       "type": "workflow",
       "enabled": true,
-      "description": "Consulta de predios del padrón en SQL Server por DNI",
+      "description": "Consulta de predios del padrón en SQL Server por DNI o código de riego",
       "action": "consultar_predio"
     },
     {

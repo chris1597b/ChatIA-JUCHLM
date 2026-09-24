@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from core.exceptions import DatabaseUnavailableError
-from security.validation import validate_dni, validate_nombre_completo
+from security.validation import validate_codigo_riego, validate_dni, validate_nombre_completo
 
 log = logging.getLogger("application")
 
@@ -100,25 +100,43 @@ def _formatear_predio_dni(fila: dict, idx: int) -> str:
     )
 
 
-def consultar_por_dni(dni: str, repository=None) -> dict:
-    """Casos 0 / 1..N. Con DNI, N filas = N predios del titular: se listan
-    todos (no es ambigüedad). repository inyectable para tests."""
-    dni_ok = validate_dni(dni)
-    repo = repository or __import__("database.repositories.predio_repository",
-                                    fromlist=["consultar_por_dni"]).consultar_por_dni
+def _listar_predios(filas: list, linea_id: str, data: dict, sin_resultados: str) -> dict:
+    """N filas = N predios del titular: se listan todos (no es ambigüedad)."""
+    if not filas:
+        return {"found": False, "count": 0, "data": None, "message": sin_resultados}
+    titular = _titular(filas[0])
+    data = {**data, "titular": titular, "predios": filas}
+    bloque = "\n\n".join(_formatear_predio_dni(f, i) for i, f in enumerate(filas, 1))
+    titulo = "Predio registrado (1)" if len(filas) == 1 else f"Predios registrados ({len(filas)})"
+    return {"found": True, "count": len(filas), "data": data,
+            "message": f"🏠 {titulo}\n\n👤 Titular:\n{titular}\n{linea_id}\n\n{bloque}"}
+
+
+def _ejecutar_consulta(valor_ok: str, repo, etiqueta: str) -> list:
     try:
-        filas = repo(dni_ok)
+        return repo(valor_ok)
     except DatabaseUnavailableError:
         raise
     except Exception:
-        log.exception("predio consultar_por_dni falló")
+        log.exception(f"predio {etiqueta} falló")
         raise DatabaseUnavailableError("Error consultando predio.")
-    if not filas:
-        return {"found": False, "count": 0, "data": None,
-                "message": "No encontré predios registrados para ese DNI."}
-    titular = _titular(filas[0])
-    bloque = "\n\n".join(_formatear_predio_dni(f, i) for i, f in enumerate(filas, 1))
-    titulo = "Predio registrado (1)" if len(filas) == 1 else f"Predios registrados ({len(filas)})"
-    return {"found": True, "count": len(filas),
-            "data": {"dni": dni_ok, "titular": titular, "predios": filas},
-            "message": (f"🏠 {titulo}\n\n👤 Titular:\n{titular}\n🪪 DNI: {dni_ok}\n\n{bloque}")}
+
+
+def consultar_por_dni(dni: str, repository=None) -> dict:
+    """Casos 0 / 1..N. repository inyectable para tests."""
+    dni_ok = validate_dni(dni)
+    repo = repository or __import__("database.repositories.predio_repository",
+                                    fromlist=["consultar_por_dni"]).consultar_por_dni
+    filas = _ejecutar_consulta(dni_ok, repo, "consultar_por_dni")
+    return _listar_predios(filas, f"🪪 DNI: {dni_ok}", {"dni": dni_ok},
+                           "No encontré predios registrados para ese DNI.")
+
+
+def consultar_por_codigo(codigo: str, repository=None) -> dict:
+    """Casos 0 / 1..N por código de riego. repository inyectable para tests."""
+    cod_ok = validate_codigo_riego(codigo)
+    repo = repository or __import__("database.repositories.predio_repository",
+                                    fromlist=["consultar_por_codigo"]).consultar_por_codigo
+    filas = _ejecutar_consulta(cod_ok, repo, "consultar_por_codigo")
+    return _listar_predios(filas, f"🏷️ Código: {cod_ok}", {"codigo": cod_ok},
+                           "No encontré predios registrados para ese código de riego.")
