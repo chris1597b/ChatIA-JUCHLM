@@ -64,7 +64,10 @@ def test_accion_invalida_rechazada():
     assert "aún no está disponible" in resp2.message
 
 
-def test_tramite_pide_datos_en_orden():
+def test_tramite_pide_datos_en_orden(tmp_path, monkeypatch):
+    import services.tramite_service as T
+    (tmp_path / "constancia_no_adeudo.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)
     o = _orc()
     _, sid = o.handle(None, "", None)
     r, _ = o.handle(sid, "", "tramite_constancia_no_adeudo")
@@ -82,6 +85,55 @@ def test_tramite_pide_datos_en_orden():
     r, _ = o.handle(sid, "", "confirmar_tramite")
     assert r.state == ConversationState.CONSTANCIA_USUARIO
     assert r.data["download_url"] == "/api/tramites/constancia-no-adeudo"
+
+
+def test_tramite_sin_pdf_avisa_amable(tmp_path, monkeypatch):
+    import services.tramite_service as T
+    monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)  # vacío: sin PDFs
+    o = _orc()
+    _, sid = o.handle(None, "", None)
+    r, _ = o.handle(sid, "", "tramite_constancia_usuario")
+    assert r.state == ConversationState.TRAMITE_MENU
+    assert "aún no está disponible" in r.message
+    assert any(a.id == "tramite_constancia_usuario" for a in r.actions)
+
+
+def _ctx_predios(o, sid, predios):
+    o.sessions.update_context(
+        sid, tramite_id="tramite_constancia_no_adeudo",
+        tramite_datos={"nombre": "X Y", "dni": "32104221", "celular": "987654321"},
+        predio={"dni": "32104221", "titular": "T", "predios": predios})
+
+
+def test_confirmar_con_varios_pide_elegir(tmp_path, monkeypatch):
+    import services.tramite_service as T
+    (tmp_path / "constancia_no_adeudo.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)
+    o = _orc()
+    _, sid = o.handle(None, "", None)
+    _ctx_predios(o, sid, [{"nombre del predio": "A", "codigo de riego": "C1"},
+                          {"nombre del predio": "B", "codigo de riego": "C2"}])
+    r, _ = o.handle(sid, "", "confirmar_tramite")
+    assert r.state == ConversationState.TRAMITE_ELEGIR_PREDIO
+    assert [a.id for a in r.actions] == ["elegir_predio_0", "elegir_predio_1", "volver_menu"]
+    r2, _ = o.handle(sid, "2", None)
+    assert r2.state == ConversationState.CONSTANCIA_USUARIO
+    assert "Predio incluido" in r2.message and "B" in r2.message
+    o.sessions.set_state(sid, ConversationState.TRAMITE_ELEGIR_PREDIO)
+    r4, _ = o.handle(sid, "", "elegir_predio_0")
+    assert "Predio incluido" in r4.message and "A" in r4.message
+
+
+def test_confirmar_con_uno_descarga_directo(tmp_path, monkeypatch):
+    import services.tramite_service as T
+    (tmp_path / "constancia_no_adeudo.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)
+    o = _orc()
+    _, sid = o.handle(None, "", None)
+    _ctx_predios(o, sid, [{"nombre del predio": "Solo", "codigo de riego": "C9"}])
+    r, _ = o.handle(sid, "", "confirmar_tramite")
+    assert r.state == ConversationState.CONSTANCIA_USUARIO
+    assert "Solo" in r.message
 
 
 def test_flujo_si_no_tras_predio():

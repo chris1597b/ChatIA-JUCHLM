@@ -19,6 +19,7 @@ if _HAS_PYDANTIC_SETTINGS:
         model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
         APP_NAME: str = "ChatJUCHLM"
+        APP_VERSION: str = "2026.09.28-constancia"
         APP_ENV: str = "development"
         APP_HOST: str = "0.0.0.0"
         APP_PORT: int = 8000
@@ -50,6 +51,7 @@ else:
     class Settings:  # fallback mínimo
         def __init__(self):
             self.APP_NAME = os.getenv("APP_NAME", "ChatJUCHLM")
+            self.APP_VERSION = os.getenv("APP_VERSION", "2026.09.28-constancia")
             self.APP_ENV = os.getenv("APP_ENV", "development")
             self.APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
             self.APP_PORT = int(os.getenv("APP_PORT", "8000"))

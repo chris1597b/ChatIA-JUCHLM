@@ -76,6 +76,28 @@ def capability_for_slug(slug: str) -> dict | None:
     return None
 
 
+def is_available(action_id: str) -> bool:
+    """¿Existe el PDF estático del trámite? Para avisar antes de pedir datos."""
+    try:
+        resolve_tramite(action_id)
+        return True
+    except (TramiteNotFoundError, DomainValidationError):
+        return False
+
+
+def esta_disponible(action_id: str) -> bool:
+    """Disponible si hay PDF estático O si se genera al momento
+    (constancia_pdf.TRAMITES). Sin esto, la guardia bloquearía el flujo
+    generado aunque no necesite ningún archivo en disco."""
+    if is_available(action_id):
+        return True
+    try:
+        from services import constancia_pdf as CP
+        return validate_capability_id(action_id) in CP.TRAMITES
+    except (DomainValidationError, ImportError):
+        return False
+
+
 def resolve_tramite(action_id: str) -> Path:
     cap = validate_capability_id(action_id)
     fname = WHITELIST.get(cap)

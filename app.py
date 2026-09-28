@@ -78,17 +78,20 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 # ---------- vistas ----------
 @app.get("/", response_class=HTMLResponse)
 async def chat_interface(request: Request):
-    return templates.TemplateResponse(request=request, name="chat.html")
+    return templates.TemplateResponse(request=request, name="chat.html",
+                                       context={"app_version": settings.APP_VERSION},
+                                       headers={"Cache-Control": "no-store"})
 
 
 @app.get("/documentos", response_class=HTMLResponse)
 async def documents_interface(request: Request):
-    return templates.TemplateResponse(request=request, name="documents.html")
+    return templates.TemplateResponse(request=request, name="documents.html",
+                                       headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "app": settings.APP_NAME}
+    return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
 
 
 # ---------- capabilities (§6) ----------
@@ -156,6 +159,41 @@ async def descargar_tramite(tramite_slug: str, role: str = Depends(get_current_r
     if cap and not AuthZ.can_access(cap.get("id", ""), role):
         return JSONResponse(status_code=403, content={"error": "Sin permiso"})
     return FileResponse(path=str(path), filename=path.name, media_type="application/pdf")
+
+
+# ---------- constancia generada (datos de sesión + predio elegido + fecha) ----------
+@app.get("/api/tramites/generar/{tramite_slug}")
+async def generar_constancia(tramite_slug: str, sid: str = "", role: str = Depends(get_current_role)):
+    import io
+    from services import constancia_pdf as CP
+    from security import authorization as AuthZ
+    from security import audit as Audit
+    from core.session_manager import session_manager
+    from core.models import ConversationState
+    slug = (tramite_slug or "").strip().lower()
+    tid = CP.TRAMITE_POR_SLUG.get(slug)
+    if not tid:
+        return JSONResponse(status_code=400, content={"error": "Trámite no disponible."})
+    if not AuthZ.can_access(tid, role):
+        return JSONResponse(status_code=403, content={"error": "Sin permiso"})
+    sesion = session_manager.get(sid)
+    if sesion is None:
+        return JSONResponse(status_code=400, content={"error": "Sesión no válida o expirada."})
+    ctx = sesion.context or {}
+    datos = ctx.get("tramite_datos") or {}
+    elegido = ctx.get("predio_elegido") or {}
+    if (sesion.state != ConversationState.CONSTANCIA_USUARIO or ctx.get("tramite_id") != tid
+            or not all(datos.get(k) for k in ("nombre", "dni", "celular")) or not elegido):
+        return JSONResponse(status_code=400, content={"error": "Completa el flujo del trámite primero."})
+    try:
+        pdf = CP.generar_constancia_pdf(datos, elegido, tid)
+    except Exception:
+        log.exception("generar constancia falló")
+        return JSONResponse(status_code=500, content={"error": "No fue posible generar el documento."})
+    Audit.audit(sid, "tramite_pdf", tid, {**datos, "predio": elegido.get("codigo de riego", "")}, "ok")
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                             headers={"Content-Disposition":
+                                      f'attachment; filename="{CP.nombre_archivo(tid, datos.get("dni", ""))}"'})
 
 
 # ---------- salud módulos ----------

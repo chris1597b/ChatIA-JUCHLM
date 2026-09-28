@@ -70,9 +70,10 @@ class ConversationOrchestrator:
                 V.validate_capability_id(act)
             except DomainValidationError:
                 return self._safe(session, "Acción no válida."), session.session_id
-            if not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu",
-                                                                 "predio_por_dni", "predio_por_codigo",
-                                                                 "confirmar_tramite", "corregir_tramite"):
+            if (not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu",
+                                                                  "predio_por_dni", "predio_por_codigo",
+                                                                  "confirmar_tramite", "corregir_tramite")
+                    and not re.fullmatch(r"elegir_predio_\d{1,2}", act or "")):
                 Audit.audit(session.session_id, "unknown_action", act, {"action": act}, "rejected")
                 return self._safe(session, "Esa función aún no está disponible."), session.session_id
             if not AuthZ.can_access(act, self.role):
@@ -92,6 +93,8 @@ class ConversationOrchestrator:
             return self._handle_tramite_form(session, msg), session.session_id
         if session.state == ConversationState.TRAMITE_REVISAR:
             return self._handle_tramite_revisar(session, msg), session.session_id
+        if session.state == ConversationState.TRAMITE_ELEGIR_PREDIO:
+            return self._handle_elegir_predio(session, msg), session.session_id
 
         # 3) PREGUNTA LIBRE (§19): clasificar intención -> RAG | workflow | fallback
         if session.state in (ConversationState.MAIN_MENU, ConversationState.JUNTA_MENU,
@@ -151,6 +154,12 @@ class ConversationOrchestrator:
                 info = T.describe(act)
             except DomainValidationError:
                 return self._safe(session, "Trámite no disponible.")
+            if not T.esta_disponible(info["cap_id"]):
+                self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
+                return AssistantResponse(
+                    message=f"{info['label']}\n\nEl formato institucional aún no está disponible. Estamos preparándolo, inténtalo más tarde.",
+                    state=ConversationState.TRAMITE_MENU,
+                    actions=tramite_menu_actions(), source="tramite")
             return self._iniciar_tramite_form(session, info)
         if act in ("confirmar_tramite",):
             return self._confirmar_tramite(session)
@@ -163,6 +172,9 @@ class ConversationOrchestrator:
                 except DomainValidationError:
                     pass
             return self._main(session, "ChatJUCHLM\n\n¿Qué deseas hacer?")
+        m_elegir = re.fullmatch(r"elegir_predio_(\d{1,2})", act or "")
+        if m_elegir:
+            return self._elegir_predio(session, int(m_elegir.group(1)))
         if act in ("finalizar",):
             self.sessions.set_state(session.session_id, ConversationState.END)
             return AssistantResponse(
@@ -249,7 +261,7 @@ class ConversationOrchestrator:
     # ---------- formulario de trámite (nombre -> DNI -> celular -> revisar) ----------
     def _iniciar_tramite_form(self, session, info: dict) -> AssistantResponse:
         self.sessions.set_state(session.session_id, ConversationState.TRAMITE_PIDE_NOMBRE)
-        self.sessions.update_context(session.session_id, tramite_id=info["cap_id"], tramite_datos={})
+        self.sessions.update_context(session.session_id, tramite_id=info["cap_id"], tramite_datos={}, predio_elegido=None)
         Audit.audit(session.session_id, "tramite", info["cap_id"], {"tramite": info["file"]}, "start")
         return AssistantResponse(
             message=f"{info['label']}\n\nPara generarla necesito algunos datos.\n\nIndícame tus apellidos y nombres completos.",
@@ -322,14 +334,87 @@ class ConversationOrchestrator:
             info = T.describe(tid)
         except DomainValidationError:
             return self._safe(session, "Trámite no disponible.")
+        if not T.esta_disponible(info["cap_id"]):
+            self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
+            return AssistantResponse(
+                message=f"{info['label']}\n\nEl formato institucional aún no está disponible. Estamos preparándolo, inténtalo más tarde.",
+                state=ConversationState.TRAMITE_MENU,
+                actions=tramite_menu_actions(), source="tramite")
         Audit.audit(session.session_id, "tramite_confirm", info["cap_id"], datos, "ok")
+        predios = (ctx.get("predio") or {}).get("predios") or []
+        if len(predios) > 1:
+            self.sessions.update_context(session.session_id, predio_elegido=None)
+            return self._elegir_predio_menu(session, predios)
+        if len(predios) == 1:
+            self.sessions.update_context(session.session_id, predio_elegido=predios[0])
+            return self._detalle_descarga(session, info)
+        # Sin predios consultados: volver al flujo de predio.
+        return self._handle_action(session, "informacion_predio")
+
+    @staticmethod
+    def _etiqueta_predio(p: dict, i: int) -> str:
+        nombre = str(p.get("nombre del predio") or "").strip()
+        if not nombre or nombre.lower() == "no encontrado":
+            nombre = f"Predio {i + 1}"
+        codigo = str(p.get("codigo de riego") or "").strip()
+        etiqueta = f"🌾 Predio {i + 1} — {nombre}"
+        if codigo and codigo.lower() != "no encontrado":
+            etiqueta += f" ({codigo})"
+        return etiqueta[:80]
+
+    def _elegir_predio_menu(self, session, predios: list) -> AssistantResponse:
+        self.sessions.set_state(session.session_id, ConversationState.TRAMITE_ELEGIR_PREDIO)
+        acciones = [_btn(f"elegir_predio_{i}", self._etiqueta_predio(p, i), "action")
+                    for i, p in enumerate(predios)]
+        acciones.append(_btn("volver_menu", "⬅️ Volver al menú", "action"))
+        return AssistantResponse(
+            message="¿Para cuál predio necesitas el informe?\n\nElige una opción o escribe su número.",
+            state=ConversationState.TRAMITE_ELEGIR_PREDIO,
+            actions=acciones, source="tramite")
+
+    def _elegir_predio(self, session, idx: int) -> AssistantResponse:
+        from services import tramite_service as T
+        ctx = self.sessions.get_or_create(session.session_id).context
+        predios = (ctx.get("predio") or {}).get("predios") or []
+        if 0 <= idx < len(predios):
+            self.sessions.update_context(session.session_id, predio_elegido=predios[idx])
+            Audit.audit(session.session_id, "tramite_predio",
+                        str(ctx.get("tramite_id", "")), {"predio": predios[idx].get("codigo de riego", idx)}, "ok")
+            try:
+                return self._detalle_descarga(session, T.describe(ctx.get("tramite_id", "")))
+            except DomainValidationError:
+                return self._safe(session, "Trámite no disponible.")
+        return self._elegir_predio_menu(session, predios) if predios else self._handle_action(session, "informacion_predio")
+
+    def _handle_elegir_predio(self, session, msg: str) -> AssistantResponse:
+        predios = (self.sessions.get_or_create(session.session_id).context.get("predio") or {}).get("predios") or []
+        if not predios:
+            return self._handle_action(session, "informacion_predio")
+        m = (msg or "").strip()
+        if m.isdigit() and 1 <= int(m) <= len(predios):
+            return self._elegir_predio(session, int(m) - 1)
+        if len(m) >= 3:
+            ml = m.lower()
+            for i, p in enumerate(predios):
+                nombre = str(p.get("nombre del predio") or "").lower()
+                codigo = str(p.get("codigo de riego") or "").strip().upper()
+                if (nombre and ml in nombre) or (codigo and m.strip().upper() == codigo):
+                    return self._elegir_predio(session, i)
+        return self._elegir_predio_menu(session, predios)
+
+    def _detalle_descarga(self, session, info: dict) -> AssistantResponse:
+        ctx = self.sessions.get_or_create(session.session_id).context
+        elegido = ctx.get("predio_elegido") or {}
+        nombre = str(elegido.get("nombre del predio") or "").strip() or "—"
         self.sessions.set_state(session.session_id, ConversationState.CONSTANCIA_USUARIO)
         return AssistantResponse(
-            message=f"✅ Datos registrados correctamente.\n\n{info['label']}\n\nPuedes descargar el formato institucional aquí:",
+            message=(f"✅ Datos registrados correctamente.\n\n🌾 Predio incluido en el informe: {nombre}\n\n"
+                     f"{info['label']}\n\nPuedes descargar el formato institucional aquí:"),
             state=ConversationState.CONSTANCIA_USUARIO,
             actions=[_btn(info["cap_id"], "⬇️ Descargar", "download"),
                      _btn("volver_menu", "⬅️ Volver al menú", "action")],
-            data={"download_url": info["download_url"], "filename": info["file"]}, source="tramite")
+            data={"download_url": f"/api/tramites/generar/{info['slug']}?sid={session.session_id}",
+                  "filename": info["file"]}, source="tramite")
 
     # ---------- rag ----------
     def _handle_rag(self, session, msg: str) -> AssistantResponse:

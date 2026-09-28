@@ -37,6 +37,14 @@ class InMemorySessionManager:
             self._store[sid] = s
             return s
 
+    def get(self, session_id: str | None) -> Session | None:
+        """Sin crear: para validar un sid que llega por URL (descargas)."""
+        if not session_id:
+            return None
+        with self._lock:
+            self._purge_locked()
+            return self._store.get(session_id)
+
     def set_state(self, session_id: str, state: ConversationState) -> Session:
         s = self.get_or_create(session_id)
         with self._lock:
