@@ -15,6 +15,7 @@ CAPABILITY_PERMISSION = {
     "consulta_documental": "can_query_junta",
     "informacion_predio": "can_query_predio",
     "tramite_constancia_usuario": "can_download_tramites",
+    "tramite_constancia_no_adeudo": "can_download_tramites",
 }
 
 

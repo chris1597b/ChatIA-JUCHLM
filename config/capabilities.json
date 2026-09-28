@@ -36,6 +36,16 @@
       "description": "Descarga del formato institucional",
       "action": "descargar_constancia_usuario",
       "file": "constancia_usuario.pdf"
+    },
+    {
+      "id": "tramite_constancia_no_adeudo",
+      "label": "📄 Constancia de no adeudo",
+      "icon": "📄",
+      "type": "tramite",
+      "enabled": true,
+      "description": "Descarga del formato institucional",
+      "action": "descargar_constancia_no_adeudo",
+      "file": "constancia_no_adeudo.pdf"
     }
   ]
 }

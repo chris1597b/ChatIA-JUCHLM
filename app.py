@@ -139,6 +139,25 @@ async def descargar_constancia(role: str = Depends(get_current_role)):
         return JSONResponse(status_code=400, content={"error": "Trámite no disponible."})
 
 
+# ---------- trámites genérico (crece con capabilities.json) ----------
+@app.get("/api/tramites/{tramite_slug}")
+async def descargar_tramite(tramite_slug: str, role: str = Depends(get_current_role)):
+    from services import tramite_service as T
+    from security import authorization as AuthZ
+    from core.exceptions import TramiteNotFoundError
+    try:
+        path = T.resolve_slug(tramite_slug)
+    except TramiteNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e.user_message)})
+    except Exception:
+        log.exception("tramite descarga falló")
+        return JSONResponse(status_code=400, content={"error": "Trámite no disponible."})
+    cap = T.capability_for_slug(tramite_slug)
+    if cap and not AuthZ.can_access(cap.get("id", ""), role):
+        return JSONResponse(status_code=403, content={"error": "Sin permiso"})
+    return FileResponse(path=str(path), filename=path.name, media_type="application/pdf")
+
+
 # ---------- salud módulos ----------
 @app.get("/api/health/rag")
 async def health_rag():

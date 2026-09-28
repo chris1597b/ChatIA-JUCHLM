@@ -21,3 +21,24 @@ def test_faltante_retorna_404_seguro(tmp_path, monkeypatch):
     monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)
     with pytest.raises(TramiteNotFoundError):
         T.resolve_tramite("constancia_usuario")
+
+
+def test_menu_tramites_crece_con_registry():
+    items = T.list_tramites()
+    ids = [i["id"] for i in items]
+    assert "tramite_constancia_usuario" in ids
+    assert "tramite_constancia_no_adeudo" in ids
+
+
+def test_slug_seguro_y_generico(tmp_path, monkeypatch):
+    (tmp_path / "constancia_no_adeudo.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)
+    assert T.resolve_slug("constancia-no-adeudo").name == "constancia_no_adeudo.pdf"
+    info = T.describe("tramite_constancia_no_adeudo")
+    assert info["download_url"] == "/api/tramites/constancia-no-adeudo"
+    with pytest.raises(DomainValidationError):
+        T.resolve_slug("../../etc/passwd")
+    with pytest.raises(DomainValidationError):
+        T.resolve_slug("inexistente")
+    assert T.is_tramite("tramite_constancia_no_adeudo") is True
+    assert T.is_tramite("tramite_falso_xyz") is False

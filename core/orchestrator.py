@@ -138,15 +138,20 @@ class ConversationOrchestrator:
             self.sessions.set_state(session.session_id, ConversationState.TRAMITE_MENU)
             return AssistantResponse(message="📄 Trámites disponibles:", state=ConversationState.TRAMITE_MENU,
                                      actions=tramite_menu_actions(), source="tramite")
-        if act in ("tramite_constancia_usuario", "descargar_constancia_usuario", "constancia_usuario"):
+        from services import tramite_service as T
+        if T.is_tramite(act):
+            try:
+                info = T.describe(act)
+            except DomainValidationError:
+                return self._safe(session, "Trámite no disponible.")
             self.sessions.set_state(session.session_id, ConversationState.CONSTANCIA_USUARIO)
+            Audit.audit(session.session_id, "tramite", info["cap_id"], {"tramite": info["file"]}, "ok")
             return AssistantResponse(
-                message="📄 Constancia de red de riego\n\nPuedes descargar el formato institucional aquí:",
+                message=f"{info['label']}\n\nPuedes descargar el formato institucional aquí:",
                 state=ConversationState.CONSTANCIA_USUARIO,
-                actions=[_btn("descargar_constancia_usuario", "⬇️ Descargar constancia", "download"),
+                actions=[_btn(info["cap_id"], "⬇️ Descargar", "download"),
                          _btn("volver_menu", "⬅️ Volver al menú", "action")],
-                data={"download_url": "/api/tramites/constancia-usuario",
-                      "filename": "constancia_usuario.pdf"}, source="tramite")
+                data={"download_url": info["download_url"], "filename": info["file"]}, source="tramite")
         if act in ("finalizar",):
             self.sessions.set_state(session.session_id, ConversationState.END)
             return AssistantResponse(
