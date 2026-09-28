@@ -71,7 +71,8 @@ class ConversationOrchestrator:
             except DomainValidationError:
                 return self._safe(session, "Acción no válida."), session.session_id
             if not Menu.is_valid_action(act) and act not in ("realizar_tramite", "finalizar", "volver_menu",
-                                                                 "predio_por_dni", "predio_por_codigo"):
+                                                                 "predio_por_dni", "predio_por_codigo",
+                                                                 "confirmar_tramite", "corregir_tramite"):
                 Audit.audit(session.session_id, "unknown_action", act, {"action": act}, "rejected")
                 return self._safe(session, "Esa función aún no está disponible."), session.session_id
             if not AuthZ.can_access(act, self.role):
@@ -85,6 +86,12 @@ class ConversationOrchestrator:
             return self._handle_predio_nombre(session, msg), session.session_id
         if session.state == ConversationState.ASK_TRAMITE:
             return self._handle_ask_tramite(session, msg), session.session_id
+        if session.state in (ConversationState.TRAMITE_PIDE_NOMBRE,
+                             ConversationState.TRAMITE_PIDE_DNI,
+                             ConversationState.TRAMITE_PIDE_CELULAR):
+            return self._handle_tramite_form(session, msg), session.session_id
+        if session.state == ConversationState.TRAMITE_REVISAR:
+            return self._handle_tramite_revisar(session, msg), session.session_id
 
         # 3) PREGUNTA LIBRE (§19): clasificar intención -> RAG | workflow | fallback
         if session.state in (ConversationState.MAIN_MENU, ConversationState.JUNTA_MENU,
@@ -144,14 +151,18 @@ class ConversationOrchestrator:
                 info = T.describe(act)
             except DomainValidationError:
                 return self._safe(session, "Trámite no disponible.")
-            self.sessions.set_state(session.session_id, ConversationState.CONSTANCIA_USUARIO)
-            Audit.audit(session.session_id, "tramite", info["cap_id"], {"tramite": info["file"]}, "ok")
-            return AssistantResponse(
-                message=f"{info['label']}\n\nPuedes descargar el formato institucional aquí:",
-                state=ConversationState.CONSTANCIA_USUARIO,
-                actions=[_btn(info["cap_id"], "⬇️ Descargar", "download"),
-                         _btn("volver_menu", "⬅️ Volver al menú", "action")],
-                data={"download_url": info["download_url"], "filename": info["file"]}, source="tramite")
+            return self._iniciar_tramite_form(session, info)
+        if act in ("confirmar_tramite",):
+            return self._confirmar_tramite(session)
+        if act in ("corregir_tramite",):
+            tid = self.sessions.get_or_create(session.session_id).context.get("tramite_id")
+            if tid:
+                from services import tramite_service as T2
+                try:
+                    return self._iniciar_tramite_form(session, T2.describe(tid))
+                except DomainValidationError:
+                    pass
+            return self._main(session, "ChatJUCHLM\n\n¿Qué deseas hacer?")
         if act in ("finalizar",):
             self.sessions.set_state(session.session_id, ConversationState.END)
             return AssistantResponse(
@@ -234,6 +245,91 @@ class ConversationOrchestrator:
         return AssistantResponse(message="¿Deseas realizar un trámite?\n\nResponde Sí o No.",
                                  state=ConversationState.ASK_TRAMITE,
                                  actions=ask_tramite_actions(), source="orchestrator")
+
+    # ---------- formulario de trámite (nombre -> DNI -> celular -> revisar) ----------
+    def _iniciar_tramite_form(self, session, info: dict) -> AssistantResponse:
+        self.sessions.set_state(session.session_id, ConversationState.TRAMITE_PIDE_NOMBRE)
+        self.sessions.update_context(session.session_id, tramite_id=info["cap_id"], tramite_datos={})
+        Audit.audit(session.session_id, "tramite", info["cap_id"], {"tramite": info["file"]}, "start")
+        return AssistantResponse(
+            message=f"{info['label']}\n\nPara generarla necesito algunos datos.\n\nIndícame tus apellidos y nombres completos.",
+            state=ConversationState.TRAMITE_PIDE_NOMBRE, actions=volver_action(), source="tramite")
+
+    def _handle_tramite_form(self, session, msg: str) -> AssistantResponse:
+        ctx = self.sessions.get_or_create(session.session_id).context
+        datos = dict(ctx.get("tramite_datos") or {})
+        state = session.state
+        try:
+            if state == ConversationState.TRAMITE_PIDE_NOMBRE:
+                datos["nombre"] = V.validate_nombre_completo(msg)
+                self.sessions.update_context(session.session_id, tramite_datos=datos)
+                self.sessions.set_state(session.session_id, ConversationState.TRAMITE_PIDE_DNI)
+                return AssistantResponse(message="Indícame tu número de DNI (8 dígitos).",
+                                         state=ConversationState.TRAMITE_PIDE_DNI,
+                                         actions=volver_action(), source="tramite")
+            if state == ConversationState.TRAMITE_PIDE_DNI:
+                datos["dni"] = V.validate_dni(msg)
+                self.sessions.update_context(session.session_id, tramite_datos=datos)
+                self.sessions.set_state(session.session_id, ConversationState.TRAMITE_PIDE_CELULAR)
+                return AssistantResponse(message="Indícame tu número de celular (9 dígitos, empieza con 9).",
+                                         state=ConversationState.TRAMITE_PIDE_CELULAR,
+                                         actions=volver_action(), source="tramite")
+            datos["celular"] = V.validate_celular(msg)
+            self.sessions.update_context(session.session_id, tramite_datos=datos)
+            return self._resumen_tramite(session)
+        except DomainValidationError as e:
+            return AssistantResponse(message=str(e), state=state,
+                                     actions=volver_action(), source="tramite")
+
+    def _resumen_tramite(self, session) -> AssistantResponse:
+        from services import tramite_service as T
+        ctx = self.sessions.get_or_create(session.session_id).context
+        datos = ctx.get("tramite_datos") or {}
+        if not all(datos.get(k) for k in ("nombre", "dni", "celular")):
+            try:
+                return self._iniciar_tramite_form(session, T.describe(ctx.get("tramite_id", "")))
+            except DomainValidationError:
+                return self._main(session, "ChatJUCHLM\n\n¿Qué deseas hacer?")
+        try:
+            etiqueta = T.describe(ctx.get("tramite_id", ""))["label"]
+        except DomainValidationError:
+            etiqueta = "tu trámite"
+        self.sessions.set_state(session.session_id, ConversationState.TRAMITE_REVISAR)
+        return AssistantResponse(
+            message=(f"📝 Revisa tus datos para: {etiqueta}\n\n"
+                     f"👤 Apellidos y nombres:\n{datos['nombre']}\n\n"
+                     f"🪪 DNI:\n{datos['dni']}\n\n"
+                     f"📱 Celular:\n{datos['celular']}"),
+            state=ConversationState.TRAMITE_REVISAR,
+            actions=[_btn("confirmar_tramite", "✅ Confirmar y descargar", "action"),
+                     _btn("corregir_tramite", "✏️ Corregir datos", "action"),
+                     _btn("volver_menu", "⬅️ Volver al menú", "action")],
+            source="tramite")
+
+    def _handle_tramite_revisar(self, session, msg: str) -> AssistantResponse:
+        if AFIRMATIVO.match(msg or ""):
+            return self._confirmar_tramite(session)
+        return self._resumen_tramite(session)
+
+    def _confirmar_tramite(self, session) -> AssistantResponse:
+        from services import tramite_service as T
+        ctx = self.sessions.get_or_create(session.session_id).context
+        datos = ctx.get("tramite_datos") or {}
+        tid = ctx.get("tramite_id", "")
+        if not all(datos.get(k) for k in ("nombre", "dni", "celular")) or not tid:
+            return self._main(session, "Empecemos de nuevo. Elige una opción.")
+        try:
+            info = T.describe(tid)
+        except DomainValidationError:
+            return self._safe(session, "Trámite no disponible.")
+        Audit.audit(session.session_id, "tramite_confirm", info["cap_id"], datos, "ok")
+        self.sessions.set_state(session.session_id, ConversationState.CONSTANCIA_USUARIO)
+        return AssistantResponse(
+            message=f"✅ Datos registrados correctamente.\n\n{info['label']}\n\nPuedes descargar el formato institucional aquí:",
+            state=ConversationState.CONSTANCIA_USUARIO,
+            actions=[_btn(info["cap_id"], "⬇️ Descargar", "download"),
+                     _btn("volver_menu", "⬅️ Volver al menú", "action")],
+            data={"download_url": info["download_url"], "filename": info["file"]}, source="tramite")
 
     # ---------- rag ----------
     def _handle_rag(self, session, msg: str) -> AssistantResponse:

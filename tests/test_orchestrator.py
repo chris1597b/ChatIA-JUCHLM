@@ -64,6 +64,26 @@ def test_accion_invalida_rechazada():
     assert "aún no está disponible" in resp2.message
 
 
+def test_tramite_pide_datos_en_orden():
+    o = _orc()
+    _, sid = o.handle(None, "", None)
+    r, _ = o.handle(sid, "", "tramite_constancia_no_adeudo")
+    assert r.state == ConversationState.TRAMITE_PIDE_NOMBRE
+    r, _ = o.handle(sid, "Perez Lopez Juan", None)
+    assert r.state == ConversationState.TRAMITE_PIDE_DNI
+    r, _ = o.handle(sid, "abc", None)
+    assert r.state == ConversationState.TRAMITE_PIDE_DNI  # error conserva estado
+    assert any(a.id == "volver_menu" for a in r.actions)
+    r, _ = o.handle(sid, "32104221", None)
+    assert r.state == ConversationState.TRAMITE_PIDE_CELULAR
+    r, _ = o.handle(sid, "987654321", None)
+    assert r.state == ConversationState.TRAMITE_REVISAR
+    assert any(a.id == "confirmar_tramite" for a in r.actions)
+    r, _ = o.handle(sid, "", "confirmar_tramite")
+    assert r.state == ConversationState.CONSTANCIA_USUARIO
+    assert r.data["download_url"] == "/api/tramites/constancia-no-adeudo"
+
+
 def test_flujo_si_no_tras_predio():
     o = _orc()
     _, sid = o.handle(None, "", None)

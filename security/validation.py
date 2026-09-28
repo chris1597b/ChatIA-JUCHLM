@@ -39,6 +39,14 @@ def validate_codigo_riego(codigo: str) -> str:
     return c
 
 
+def validate_celular(celular: str) -> str:
+    """Celular Perú: 9 dígitos empezando con 9. Se toleran espacios/guiones."""
+    c = re.sub(r"[\s\-]", "", str(celular or ""))
+    if not re.fullmatch(r"9\d{8}", c):
+        raise DomainValidationError("Indícame tu número de celular (9 dígitos, empieza con 9).")
+    return c
+
+
 def validate_capability_id(cap_id: str) -> str:
     cap_id = (cap_id or "").strip()
     if not _CAP_RE.match(cap_id):
