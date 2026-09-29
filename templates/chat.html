@@ -385,7 +385,7 @@
             function finishTyping() {
                 if (twFinished) return; twFinished = true;
                 stage.stop();
-                const renderFinal = () => { contentDiv.innerHTML = marked.parse(rawAiResponse); scrollToBottom(); };
+                const renderFinal = () => { contentDiv.innerHTML = renderMarkdown(rawAiResponse); scrollToBottom(); };
                 if (tw) tw.finish(renderFinal); else renderFinal();
             }
 
@@ -438,7 +438,7 @@
         } catch (error) {
             console.error(error);
             stage.stop();
-            if (tw) { tw.cancel(); contentDiv.innerHTML = marked.parse(rawAiResponse); }
+            if (tw) { tw.cancel(); contentDiv.innerHTML = renderMarkdown(rawAiResponse); }
             else { loader.innerHTML = `<span class="text-error">Error al conectar con el servidor.</span>`; }
         }
     }
@@ -480,6 +480,28 @@
             setStage(i) { if (i > idx && i < RAG_STAGES.length) { idx = i; labelEl.textContent = RAG_STAGES[idx]; } },
             stop() { if (timer) { clearInterval(timer); timer = null; } }
         };
+    }
+
+    // Markdown seguro: si el CDN falla, texto plano (nunca pantalla vacía).
+    function renderMarkdown(t) {
+        try { if (typeof marked !== 'undefined') return marked.parse(escapeHtml(t)); } catch (e) {}
+        return escapeHtml(t).replace(/\n/g, '<br>');
+    }
+
+    // Burbuja de error visible con salida (nunca fallos silenciosos).
+    function showErrorBubble(msg) {
+        try {
+            const chatMessages = document.getElementById('chat-messages');
+            const w = document.createElement('div');
+            w.className = 'flex justify-start';
+            w.innerHTML = `<div class="surface-glass rounded-2xl rounded-tl-sm px-md py-sm max-w-[85%] border"><p class="font-body-md text-body-md">⚠️ ${escapeHtml(msg || 'No se pudo completar la acción. Intenta de nuevo.')}</p><div class="ai-actions mt-2"></div></div>`;
+            const box = w.querySelector('.ai-actions');
+            const b = document.createElement('button');
+            b.className = 'juchlm-action-btn'; b.textContent = '⬅️ Volver al menú';
+            b.onclick = () => { try { addUserBubble('⬅️ Volver'); JUCHLM.postMessage('', 'volver_menu').then(renderOrchestrated).catch(() => {}); } catch (e) {} };
+            box.appendChild(b);
+            chatMessages.appendChild(w); scrollToBottom();
+        } catch (e) { console.error('showErrorBubble:', e); }
     }
 
     // Burbuja "pensando" para la vía orquestada (respuesta JSON única).
@@ -549,18 +571,34 @@
         const tw = createTypewriter(contentEl.querySelector('.type-text'), { charsPerTick: full.length > 1800 ? 30 : 14 });
         tw.push(full);
         tw.finish(() => {
-            contentEl.innerHTML = (data && data.predios && data.predios.length)
-                ? renderPredios(data)
-                : marked.parse(escapeHtml(full));
+            let html;
+            try {
+                html = (data && data.predios && data.predios.length)
+                    ? renderPredios(data)
+                    : renderMarkdown(full);
+            } catch (e) { console.error('render:', e); html = renderMarkdown(full); }
+            contentEl.innerHTML = html;
             const box = w.querySelector('.ai-actions');
             (actions||[]).forEach(a => {
                 const b = document.createElement('button');
                 b.className = 'juchlm-action-btn'; b.textContent = a.label;
-                b.onclick = () => {
-                    if (a.type === 'download') { window.location.href = (data && data.download_url) || '/api/tramites/constancia-usuario'; return; }
-                    addUserBubble(a.label);
-                    const th = showThinking();
-                    JUCHLM.postMessage('', a.id).then(p => { th.done(); renderOrchestrated(p); }).catch(() => { th.done(); sendMessageLegacy(); });
+            b.onclick = () => {
+                // Solo el botón ⬇️ del detalle descarga (trae download_url).
+                // Sin URL no se navega: evita caer al endpoint estático legado.
+                if (a.type === 'download') {
+                    if (data && data.download_url) { window.location.href = data.download_url; }
+                    return;
+                }
+                addUserBubble(a.label);
+                    let th = null;
+                    try { th = showThinking(); } catch (e) {}
+                    const bye = () => { try { if (th) th.done(); } catch (e) {} };
+                    try {
+                        JUCHLM.postMessage('', a.id).then(p => {
+                            bye();
+                            try { renderOrchestrated(p); } catch (e) { console.error('render:', e); showErrorBubble(); }
+                        }).catch((e) => { console.error('postMessage:', e); bye(); showErrorBubble(); });
+                    } catch (e) { console.error('click:', e); bye(); showErrorBubble(); }
                 };
                 box.appendChild(b);
             });
@@ -580,7 +618,7 @@
         if (bar && r.actions && r.actions.length && (r.state === 'MAIN_MENU' || r.state === 'TRAMITE_MENU')) {
             JUCHLM.renderActions(bar, r.actions, (a) => {
                 addUserBubble(a.label);
-                JUCHLM.postMessage('', a.id).then(renderOrchestrated).catch(()=>{});
+                JUCHLM.postMessage('', a.id).then(p => { try { renderOrchestrated(p); } catch (e) { console.error('render:', e); showErrorBubble(); } }).catch((e) => { console.error('postMessage:', e); showErrorBubble(); });
             });
         } else if (bar && r.state !== 'MAIN_MENU' && r.state !== 'TRAMITE_MENU') { bar.innerHTML = ''; }
     }

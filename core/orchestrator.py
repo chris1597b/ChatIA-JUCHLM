@@ -34,8 +34,11 @@ def ask_tramite_actions() -> list[ActionButton]:
 
 
 def tramite_menu_actions() -> list[ActionButton]:
+    # OJO: los botones del menú son NAVEGACIÓN (inician el formulario),
+    # no descargas. Solo el botón ⬇️ del detalle usa type="download".
+    # Si van como "download", el frontend navega directo a una URL muerta.
     items = Menu.get_tramite_menu()
-    out = [_btn(c["id"], c["label"], "download") for c in items]
+    out = [_btn(c["id"], c["label"], "action") for c in items]
     out.append(_btn("volver_menu", "⬅️ Volver al menú", "action"))
     return out
 

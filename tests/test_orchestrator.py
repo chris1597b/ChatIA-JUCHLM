@@ -136,6 +136,31 @@ def test_confirmar_con_uno_descarga_directo(tmp_path, monkeypatch):
     assert "Solo" in r.message
 
 
+def test_menu_tramite_no_navega_descarga():
+    """Regresión: los botones del menú eran type=download sin URL y el
+    frontend navegaba al endpoint estático muerto."""
+    o = _orc()
+    _, sid = o.handle(None, "", None)
+    r, _ = o.handle(sid, "", "realizar_tramite")
+    assert r.state == ConversationState.TRAMITE_MENU
+    for a in r.actions:
+        assert a.type != "download", a.id
+
+
+def test_boton_descargar_lleva_url_generar(tmp_path, monkeypatch):
+    import services.tramite_service as T
+    (tmp_path / "constancia_no_adeudo.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(T, "TRAMITES_DIR", tmp_path)
+    o = _orc()
+    _, sid = o.handle(None, "", None)
+    _ctx_predios(o, sid, [{"nombre del predio": "A", "codigo de riego": "C1"}])
+    r, _ = o.handle(sid, "", "confirmar_tramite")
+    assert r.state == ConversationState.CONSTANCIA_USUARIO
+    dl = [a for a in r.actions if a.type == "download"]
+    assert len(dl) == 1
+    assert r.data["download_url"].startswith("/api/tramites/generar/")
+
+
 def test_flujo_si_no_tras_predio():
     o = _orc()
     _, sid = o.handle(None, "", None)

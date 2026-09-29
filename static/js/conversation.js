@@ -27,9 +27,6 @@
       b.className = "juchlm-action-btn";
       b.textContent = a.label;
       b.onclick = () => onPick(a);
-      if (a.type === "download" && a.id === "descargar_constancia_usuario") {
-        b.onclick = () => { window.location.href = "/api/tramites/constancia-usuario"; };
-      }
       container.appendChild(b);
     });
   }
