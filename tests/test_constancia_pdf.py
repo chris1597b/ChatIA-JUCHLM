@@ -26,6 +26,9 @@ def test_genera_pdf_con_datos():
     pdf = CP.generar_constancia_pdf(_datos(), _predio(), "tramite_constancia_usuario",
                                     datetime(2026, 9, 28))
     assert pdf[:4] == b"%PDF"
+    from pypdf import PdfReader
+    import io
+    assert len(PdfReader(io.BytesIO(pdf)).pages) == 1, "el formato debe caber en una hoja"
     txt = _texto(pdf)
     assert "SEGURA SALINAS MARITHZA MARLENI" in txt
     assert "32104221" in txt and "987654321" in txt

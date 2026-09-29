@@ -92,24 +92,25 @@ def generar_constancia_pdf(datos: dict, predio: dict, tramite_id: str,
     codigo = _limpio(predio, "codigo de riego").upper()
 
     buf = io.BytesIO()
+    # Una sola hoja: márgenes y espaciados ajustados para el contenido fijo.
     doc = BaseDocTemplate(buf, pagesize=A4,
-                          leftMargin=2.5 * cm, rightMargin=2.5 * cm,
-                          topMargin=2 * cm, bottomMargin=2 * cm)
+                          leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+                          topMargin=1.6 * cm, bottomMargin=1.6 * cm)
     frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="m")
     doc.addPageTemplates([PageTemplate(id="p", frames=[frame])])
 
-    base = ParagraphStyle("base", fontName="Helvetica", fontSize=11, leading=15, alignment=TA_JUSTIFY)
+    base = ParagraphStyle("base", fontName="Helvetica", fontSize=10.5, leading=13.5, alignment=TA_JUSTIFY)
     bold = ParagraphStyle("bold", parent=base, fontName="Helvetica-Bold")
     center = ParagraphStyle("center", parent=base, alignment=TA_CENTER)
-    center_bi = ParagraphStyle("center_bi", parent=center, fontName="Helvetica-BoldOblique", fontSize=12)
-    right = ParagraphStyle("right", parent=base, alignment=TA_RIGHT, fontName="Helvetica-Bold", fontSize=11)
+    center_bi = ParagraphStyle("center_bi", parent=center, fontName="Helvetica-BoldOblique", fontSize=11.5)
+    right = ParagraphStyle("right", parent=base, alignment=TA_RIGHT, fontName="Helvetica-Bold", fontSize=10.5)
 
     E = escape
     story = [
         Paragraph(f"\u201c<i><b>{E(ANIO_FRASE)}</b></i>\u201d", center_bi),
-        Spacer(1, 0.8 * cm),
+        Spacer(1, 0.35 * cm),
         Paragraph("SOLICITA:", right),
-        Spacer(1, 0.15 * cm),
+        Spacer(1, 0.1 * cm),
     ]
 
     filas_check = []
@@ -127,24 +128,24 @@ def generar_constancia_pdf(datos: dict, predio: dict, tramite_id: str,
         ("LEFTPADDING", (0, 0), (0, -1), 150),
         ("ALIGN", (1, 0), (1, -1), "CENTER"),
     ]))
-    story += [t_check, Spacer(1, 0.6 * cm)]
+    story += [t_check, Spacer(1, 0.25 * cm)]
 
     story += [
         Paragraph("Señor:", bold),
         Paragraph("ING. SANTOS D. FARIAS CABREJO", bold),
         Paragraph("Gerente JUSHMCHL CLASE A", base),
         Paragraph("<u>Ciudad</u>.-", base),
-        Spacer(1, 0.5 * cm),
+        Spacer(1, 0.25 * cm),
         Paragraph(f"Yo, <b>{E(nombre_sol)}</b>, agricultor(a) del Sub Sector Hidráulico: "
                   f"<b>{E(comision)}</b> identificado(a) con DNI. Nº <b>{E(dni_sol)}</b> ante Usted, "
                   f"con el debido respeto me presento y expongo:", base),
-        Spacer(1, 0.3 * cm),
+        Spacer(1, 0.15 * cm),
         Paragraph(f"Que necesito realizar trámite documentario ante la Administración Local de Agua "
                   f"Chancay Lambayeque, por lo que solicito a su despacho me extienda "
                   f"{E(cfg['constancia'])} de la Junta de Usuarios Chancay Lambayeque.", base),
-        Spacer(1, 0.4 * cm),
+        Spacer(1, 0.2 * cm),
         Paragraph("Las características del predio son:", base),
-        Spacer(1, 0.15 * cm),
+        Spacer(1, 0.1 * cm),
     ]
 
     filas_predio = [
@@ -156,16 +157,16 @@ def generar_constancia_pdf(datos: dict, predio: dict, tramite_id: str,
                      colWidths=[4.2 * cm, 0.6 * cm, 10 * cm])
     t_predio.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                   ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
-    story += [t_predio, Spacer(1, 0.4 * cm),
+    story += [t_predio, Spacer(1, 0.2 * cm),
               Paragraph("Es justicia que espero alcanzar.", base),
-              Spacer(1, 0.8 * cm),
+              Spacer(1, 0.35 * cm),
               Paragraph(f"Chiclayo, {fecha.day} de {MESES[fecha.month - 1]} de {fecha.year}",
                         ParagraphStyle("fecha", parent=base, alignment=TA_RIGHT)),
-              Spacer(1, 1.6 * cm),
+              Spacer(1, 2 * cm),
               HRFlowable(width="60%", thickness=1, color="black", hAlign="CENTER"),
               Paragraph(f"<b>{E(nombre_sol)}</b>", center),
               Paragraph(f"<b>DNI.</b> {E(dni_sol)}", center),
-              Spacer(1, 1.2 * cm),
+              Spacer(1, 0.5 * cm),
               Paragraph(f"<b>CELULAR:</b> {E(cel_sol)}", base)]
 
     doc.build(story)
