@@ -75,7 +75,7 @@ def _mostrar(v) -> str:
 
 
 def _titular(fila: dict) -> str:
-    partes = [_mostrar(fila.get(k)) for k in ("nombres", "apellido paterno", "apellido materno")]
+    partes = [_mostrar(fila.get(k)) for k in ("apellido paterno", "apellido materno", "nombres")]
     return " ".join(p for p in partes if p != "—") or "—"
 
 

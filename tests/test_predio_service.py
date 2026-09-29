@@ -55,7 +55,7 @@ def test_dni_un_predio_formatea_sin_llm():
     out = P.consultar_por_dni("32104221", repository=lambda d: [_fila_dni()])
     assert out["count"] == 1
     assert "32104221" in out["message"] and "CR-001" in out["message"]
-    assert "4.50 ha" in out["message"] and "Juan Perez Lopez" in out["message"]
+    assert "4.50 ha" in out["message"] and "Perez Lopez Juan" in out["message"]
 
 
 def test_dni_multiples_lista_todos():
