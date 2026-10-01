@@ -89,7 +89,8 @@ def _formatear_predio_dni(fila: dict, idx: int) -> str:
     punto = "🟢" if estado.lower() == "activo" else ("🔴" if estado.lower() == "desactivo" else "⚪")
     # Tarjeta por predio: un campo por fila.
     return (
-        f"🌾 Predio {idx} — {_mostrar(fila.get('nombre del predio'))}\n"
+        f"🌾 Predio {idx}:\n"
+        f"📛 Nombre: {_mostrar(fila.get('nombre del predio'))}\n"
         f"🏷️ Código de riego: {_mostrar(fila.get('codigo de riego'))}\n"
         f"📐 Área: {area_txt}\n"
         f"🚰 Canal: {_mostrar(fila.get('canal'))}\n"

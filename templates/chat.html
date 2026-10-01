@@ -546,7 +546,8 @@
             const est = val(p, 'estado'), sl = est.toLowerCase();
             const dot = sl === 'activo' ? '🟢' : (sl === 'desactivo' ? '🔴' : '⚪');
             h += `<div class="predio-item">`
-                + `<div class="predio-item-title">🌾 Predio ${i + 1}: ${val(p, 'nombre del predio')}</div>`
+                + `<div class="predio-item-title">🌾 Predio ${i + 1}:</div>`
+                + row('📛', 'Nombre', val(p, 'nombre del predio'))
                 + row('🏷️', 'Código de riego', val(p, 'codigo de riego'))
                 + row('📐', 'Área', areaTxt)
                 + row('🚰', 'Canal', val(p, 'canal'))
