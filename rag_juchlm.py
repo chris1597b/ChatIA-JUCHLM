@@ -3364,12 +3364,16 @@ def generar_respuesta_validada(llm, prompt, question: str, docs: list[Document],
 
 
 def construir_llm():
+    # GPU: num_ctx 4096 (medido ~1600 tokens reales) para que pesos (3.4GB)
+    # + KV quepan en 6GB VRAM. Con 8192 Ollama hacía offload 0 capas -> CPU.
+    # num_gpu=-1 = offload de todas las capas que quepan.
     return ChatOllama(
         model=LLM_MODEL,
         base_url=OLLAMA_URL,
         temperature=TEMPERATURE,
         num_predict=MAX_TOKENS_RESPUESTA,
-        num_ctx=CONTEXTO_LLM,
+        num_ctx=4096,
+        num_gpu=-1,
         reasoning=False,
         streaming=False,
     )
