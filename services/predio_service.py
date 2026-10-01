@@ -130,7 +130,7 @@ def consultar_por_dni(dni: str, repository=None) -> dict:
                                     fromlist=["consultar_por_dni"]).consultar_por_dni
     filas = _ejecutar_consulta(dni_ok, repo, "consultar_por_dni")
     return _listar_predios(filas, f"🪪 DNI: {dni_ok}", {"dni": dni_ok},
-                           "No encontré predios registrados para ese DNI.")
+                           "No encontré predios registrados para ese DNI , vuelve a intentarlo o ingresa un DNI válido.")
 
 
 def consultar_por_codigo(codigo: str, repository=None) -> dict:
@@ -140,4 +140,4 @@ def consultar_por_codigo(codigo: str, repository=None) -> dict:
                                     fromlist=["consultar_por_codigo"]).consultar_por_codigo
     filas = _ejecutar_consulta(cod_ok, repo, "consultar_por_codigo")
     return _listar_predios(filas, f"🏷️ Código: {cod_ok}", {"codigo": cod_ok},
-                           "No encontré predios registrados para ese código de riego.")
+                           "No encontré predios registrados para ese código de riego, vuelve a intentarlo o ingresa un código válido.")
