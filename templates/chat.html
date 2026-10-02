@@ -543,8 +543,6 @@
             try { areaTxt = (p.area == null || p.area === '') ? '—' : (parseFloat(p.area).toFixed(2) + ' ha'); }
             catch (e) { areaTxt = val(p, 'area'); }
             if (areaTxt === 'NaN ha') areaTxt = val(p, 'area');
-            const est = val(p, 'estado'), sl = est.toLowerCase();
-            const dot = sl === 'activo' ? '🟢' : (sl === 'desactivo' ? '🔴' : '⚪');
             h += `<div class="predio-item">`
                 + `<div class="predio-item-title">🌾 Predio ${i + 1}:</div>`
                 + row('📛', 'Nombre', val(p, 'nombre del predio'))
@@ -554,7 +552,6 @@
                 + row('🏛️', 'Comisión', val(p, 'comision'))
                 + row('📋', 'Régimen', val(p, 'regimen'))
                 + row('🔖', 'UC', val(p, 'uc_actual'))
-                + row(dot, 'Estado', est)
                 + `</div>`;
         });
         h += `</div><div class="predio-ask">¿Deseas realizar un trámite?</div>`;

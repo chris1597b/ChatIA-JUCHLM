@@ -18,19 +18,17 @@ def _formatear_predio(row: dict) -> str:
     codigo = g("codigo_predio", "codigopredio", "codigo", "cod_predio")
     sector = g("sector", "zona", "ubicacion")
     area = g("area", "area_ha", "hectareas")
-    estado = g("estado", "situacion")
     try:
         area_txt = f"{float(area):.2f} ha" if area != "—" else "—"
     except Exception:
         area_txt = str(area)
-    # Plantilla estructurada backend (§15). Sin LLM.
+    # Plantilla estructurada backend (§15). Sin LLM. Sin estado (privado).
     return (
         "🏠 Información del predio\n\n"
         f"👤 Usuario:\n{nombre}\n\n"
         f"📍 Sector:\n{sector}\n\n"
         f"🏷️ Código de predio:\n{codigo}\n\n"
-        f"📐 Área:\n{area_txt}\n\n"
-        f"✅ Estado:\n{estado}"
+        f"📐 Área:\n{area_txt}"
     )
 
 
@@ -85,9 +83,7 @@ def _formatear_predio_dni(fila: dict, idx: int) -> str:
         area_txt = f"{float(area):.2f} ha" if area is not None else "—"
     except (TypeError, ValueError):
         area_txt = _mostrar(area)
-    estado = _mostrar(fila.get("estado"))
-    punto = "🟢" if estado.lower() == "activo" else ("🔴" if estado.lower() == "desactivo" else "⚪")
-    # Tarjeta por predio: un campo por fila.
+    # Tarjeta por predio: un campo por fila. Sin estado (privado).
     return (
         f"🌾 Predio {idx}:\n"
         f"📛 Nombre: {_mostrar(fila.get('nombre del predio'))}\n"
@@ -96,8 +92,7 @@ def _formatear_predio_dni(fila: dict, idx: int) -> str:
         f"🚰 Canal: {_mostrar(fila.get('canal'))}\n"
         f"🏛️ Comisión: {_mostrar(fila.get('comision'))}\n"
         f"📋 Régimen: {_mostrar(fila.get('regimen'))}\n"
-        f"🔖 UC: {_mostrar(fila.get('uc_actual'))}\n"
-        f"{punto} Estado: {estado}"
+        f"🔖 UC: {_mostrar(fila.get('uc_actual'))}"
     )
 
 
