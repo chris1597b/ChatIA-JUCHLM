@@ -74,6 +74,9 @@ JC_URL: str = ENV.get("JC_URL", "http://127.0.0.1:8000").rstrip("/")
 BRIDGE_PORT: int = int(ENV.get("BRIDGE_PORT", "2786"))
 ALLOW_GROUPS: bool = ENV.get("ALLOW_GROUPS", "false").lower() == "true"
 SEND_ACK: bool = ENV.get("SEND_ACK", "true").lower() == "true"
+SEND_TYPING: bool = ENV.get("SEND_TYPING", "true").lower() == "true"
+TYPING_PRIMER_REFRESCO = 3  # 1er re-afirmado tras el ACK (un envio puede limpiar 'composing')
+TYPING_INTERVAL = 20        # WhatsApp vence el indicador 'escribiendo...' en ~25 s
 MESSAGE_PREFIX: str = ENV.get("MESSAGE_PREFIX", "")
 
 if not WEBHOOK_SECRET or len(WEBHOOK_SECRET) < 16:
@@ -268,6 +271,31 @@ def texto_con_opciones(texto: str, acciones: list) -> tuple[str, list]:
 
 
 # ------------------------------------------------------------------ OpenWA
+def wa_typing(chat_id: str, estado: str) -> None:
+    """Presencia 'escribiendo...' (typing) o 'paused' para limpiarla. Fallo no fatal."""
+    url = f"{OPENWA_URL}/api/sessions/{OPENWA_SESSION}/chats/typing"
+    try:
+        code, _ = http_json("POST", url, {"chatId": chat_id, "state": estado},
+                            {"X-API-Key": OPENWA_API_KEY}, 15)
+        if code in (200, 201):
+            log.info("typing '%s' %s", estado, chat_id)
+        else:
+            log.warning("typing '%s' %s -> HTTP %d", estado, chat_id, code)
+    except Exception as e:
+        log.warning("typing '%s' %s excepcion: %r", estado, chat_id, e)
+
+
+def _typing_loop(chat_id: str, stop: threading.Event) -> None:
+    """Keep-alive del indicador: WhatsApp lo vence a ~25 s. El 1er re-afirmado es a los
+    3 s (el envio del ACK puede limpiar el 'composing' del lado WhatsApp Web); luego
+    cada TYPING_INTERVAL."""
+    if stop.wait(TYPING_PRIMER_REFRESCO):
+        return
+    wa_typing(chat_id, "typing")
+    while not stop.wait(TYPING_INTERVAL):
+        wa_typing(chat_id, "typing")
+
+
 def wa_send(chat_id: str, texto: str) -> None:
     url = f"{OPENWA_URL}/api/sessions/{OPENWA_SESSION}/messages/send-text"
     payload = {"chatId": chat_id, "text": texto}
@@ -354,10 +382,29 @@ def pipeline(chat_id: str, texto_usuario: str) -> None:
                 log.info("chip '%s' -> action_id=%s (paridad botones web)", texto_usuario[:40], click)
                 response = jc_click(sid, click)
             else:
-                if SEND_ACK:
-                    wa_send(chat_id, "🤔 Consultando al asistente JUCHLM...")
-                log.info("jc <- %r (%s) sid=%s", texto_usuario[:80], chat_id, sid)
-                response = jc_message(sid, texto_usuario)
+                hilo_typing = None
+                stop_typing = None
+                try:
+                    if SEND_ACK:
+                        wa_send(chat_id, "🤔 Consultando al asistente JUCHLM...")
+                    if SEND_TYPING:
+                        # animacion de escritura mientras FSM/RAG procesa (puede tardar min en
+                        # frio). Se enciende DESPUES del ACK: el propio envio del mensaje
+                        # limpia el 'composing' del lado WhatsApp Web, y asi los puntos
+                        # aparecen justo cuando el usuario termina de leer el ACK.
+                        wa_typing(chat_id, "typing")
+                        stop_typing = threading.Event()
+                        hilo_typing = threading.Thread(
+                            target=_typing_loop, args=(chat_id, stop_typing),
+                            daemon=True, name="typing")
+                        hilo_typing.start()
+                    log.info("jc <- %r (%s) sid=%s", texto_usuario[:80], chat_id, sid)
+                    response = jc_message(sid, texto_usuario)
+                finally:
+                    if stop_typing:
+                        stop_typing.set()
+                        hilo_typing.join(timeout=0.5)
+                        wa_typing(chat_id, "paused")
             response = response or {}
             acciones = response.get("actions") if isinstance(response.get("actions"), list) else []
             datos = response.get("data") if isinstance(response.get("data"), dict) else {}

@@ -127,6 +127,11 @@ La experiencia del chat web (botones, PDF) se replica en el canal por el mismo c
    falla o supera 25 MB, el mensaje conserva el enlace absoluto al portal.
 4. Clicks y consultas usan la MISMA sesión FSM (`wa<digits>`) que el portal asigna por
    `session_id`; el PDF queda ligado a esa sesión (`?sid=<sid>`).
+5. **Indicador de escritura.** Tras el mensaje "Consultando al asistente…" el puente enciende
+   "escribiendo…" en el chat y lo mantiene vivo mientras el asistente procesa (RAG/FSM, hasta
+   ~2 min con modelos en frío): un re-afirmado a los 3 s (por si el envío del ACK limpió el
+   indicador en WhatsApp Web) y keep-alive cada 20 s (WhatsApp lo vence a ~25 s). Al entregar
+   la respuesta lo limpia con `paused`. Desactivable con `SEND_TYPING=false`.
 
 ## Rollback (cero rastro)
 
