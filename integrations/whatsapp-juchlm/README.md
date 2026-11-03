@@ -132,6 +132,11 @@ La experiencia del chat web (botones, PDF) se replica en el canal por el mismo c
    ~2 min con modelos en frío): un re-afirmado a los 3 s (por si el envío del ACK limpió el
    indicador en WhatsApp Web) y keep-alive cada 20 s (WhatsApp lo vence a ~25 s). Al entregar
    la respuesta lo limpia con `paused`. Desactivable con `SEND_TYPING=false`.
+6. **Watchdog autocurativo.** Si el navegador de WhatsApp muere (o el motor de OpenWA queda
+   trabado), el bot se queda "mudo": los mensajes siguen llegando al gateway pero ningún
+   webhook alcanza el puente. El puente revisa el estado de la sesión cada 60 s y la recupera
+   solo (`POST /sessions/{id}/start`; si sigue caída, `stop` + `start`). Al arrancar también
+   la levanta si no está `ready`. Configurable con `WATCHDOG_SESSION=false`.
 
 ## Rollback (cero rastro)
 

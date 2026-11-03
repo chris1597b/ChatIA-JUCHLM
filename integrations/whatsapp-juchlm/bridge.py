@@ -79,6 +79,14 @@ TYPING_PRIMER_REFRESCO = 3  # 1er re-afirmado tras el ACK (un envio puede limpia
 TYPING_INTERVAL = 20        # WhatsApp vence el indicador 'escribiendo...' en ~25 s
 MESSAGE_PREFIX: str = ENV.get("MESSAGE_PREFIX", "")
 
+# Autocuracion de la sesion de OpenWA: si el navegador de WhatsApp muere (o el motor
+# queda trabado), el puente lo detecta y reconecta solo. Sin esto, una caida deja al
+# bot "mudo" (los mensajes entran al gateway pero ningun webhook llega al puente).
+WATCHDOG: bool = ENV.get("WATCHDOG_SESSION", "true").lower() == "true"
+WATCHDOG_INTERVAL = int(ENV.get("WATCHDOG_INTERVAL", "60"))   # revision de estado (s)
+WATCHDOG_START_TRAS = int(ENV.get("WATCHDOG_START_TRAS", "2"))  # 2 fallos -> POST /start
+WATCHDOG_RESTART_TRAS = int(ENV.get("WATCHDOG_RESTART_TRAS", "5"))  # 5 fallos -> stop+start
+
 if not WEBHOOK_SECRET or len(WEBHOOK_SECRET) < 16:
     raise SystemExit("WEBHOOK_SECRET debe existir y tener >= 16 caracteres")
 if not OPENWA_API_KEY:
@@ -559,6 +567,57 @@ class Handler(BaseHTTPRequestHandler):
 
 executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="wa")
 
+def _session_start() -> bool:
+    """Pide a OpenWA que (re)conecte la sesion. 409 = ya esta arrancando: no es error."""
+    code, resp = http_json("POST", f"{OPENWA_URL}/api/sessions/{OPENWA_SESSION}/start",
+                           {}, {"X-API-Key": OPENWA_API_KEY}, 120)
+    return code in (200, 201, 409)
+
+
+def _session_status() -> str | None:
+    try:
+        code, resp = http_json("GET", f"{OPENWA_URL}/api/sessions/{OPENWA_SESSION}",
+                               None, {"X-API-Key": OPENWA_API_KEY}, 20)
+        if code not in (200, 201):
+            return None
+        st = resp.get("status") or resp.get("session") or {}
+        return st.get("status") if isinstance(st, dict) else str(st)
+    except Exception:
+        return None
+
+
+def _watchdog_loop(stop: threading.Event) -> None:
+    """Vigila la sesion de WhatsApp y la recupera sola si se cae.
+
+    Escalada: 2 revisiones fallidas -> POST /start (reconectar el navegador);
+    5 revisiones fallidas -> stop + start (motor nuevo, p. ej. proceso colgado).
+    """
+    caidos = 0
+    while not stop.wait(WATCHDOG_INTERVAL):
+        estado = _session_status()
+        if estado == "ready":
+            if caidos:
+                log.info("watchdog: sesion recuperada (status=ready)")
+            caidos = 0
+            continue
+        caidos += 1
+        log.warning("watchdog: sesion '%s' no lista (status=%s, revision %d)",
+                    OPENWA_SESSION, estado, caidos)
+        if caidos >= WATCHDOG_RESTART_TRAS:
+            log.warning("watchdog: motor trabado -> stop + start de la sesion")
+            try:
+                http_json("POST", f"{OPENWA_URL}/api/sessions/{OPENWA_SESSION}/stop",
+                          {}, {"X-API-Key": OPENWA_API_KEY}, 120)
+            except Exception as e:
+                log.warning("watchdog: stop fallo: %r", e)
+            time.sleep(8)
+            _session_start()
+            caidos = 0
+        elif caidos >= WATCHDOG_START_TRAS:
+            log.warning("watchdog: reintentando conexion de la sesion (start)")
+            _session_start()
+
+
 def main() -> None:
     # ping de arranque: confirmar config de OpenWA antes de esperar webhooks
     try:
@@ -580,6 +639,18 @@ def main() -> None:
         log.info("ChatJUCHLM health HTTP %d", jc_code)
     except Exception as e:
         log.error("ChatJUCHLM inalcanzable en %s: %r (arrancalo primero)", JC_URL, e)
+
+    # Autocuracion: si la sesion de WhatsApp quedo caida (navegador muerto o motor
+    # trabado), el puente la levanta al arrancar y la vigila en segundo plano.
+    if WATCHDOG:
+        estado = _session_status()
+        if estado != "ready":
+            log.warning("Sesion '%s' no lista al arrancar (status=%s): intentando conectar",
+                        OPENWA_SESSION, estado)
+            _session_start()
+        threading.Thread(target=_watchdog_loop, args=(threading.Event(),),
+                         daemon=True, name="watchdog").start()
+        log.info("Watchdog de sesion activo (revision cada %ds)", WATCHDOG_INTERVAL)
 
     server = ThreadingHTTPServer(("127.0.0.1", BRIDGE_PORT), Handler)
     log.info("Bridge WA->JUCHLM escuchando en http://127.0.0.1:%d/webhook "
