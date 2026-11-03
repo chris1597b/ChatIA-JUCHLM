@@ -21,3 +21,14 @@ chromadb/
 # IDE
 .vscode/
 .idea/
+
+# Integraciones externas:
+# - integrations/OpenWA: repositorio anidado (shallow clone) con node_modules y
+#   data/ SENSIBLE (sesion de WhatsApp emparejada + api-key): NUNCA se versiona.
+# - integrations/whatsapp-juchlm (el puente propio) SI se versiona: bridge.py,
+#   selftest.py, README.md y .env.example (sin secretos; el .env real ya queda
+#   cubierto por las reglas globales de variables de entorno de arriba).
+integrations/OpenWA/
+integrations/whatsapp-juchlm/logs/
+integrations/whatsapp-juchlm/__pycache__/
+!integrations/whatsapp-juchlm/.env.example
