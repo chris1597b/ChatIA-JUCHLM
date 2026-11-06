@@ -23,6 +23,25 @@
 4. El puente convierte la respuesta a formato WhatsApp (negritas, listas, máx 3800 chars)
    y la manda con `POST /api/sessions/{sesion}/messages/send-text` (API key).
 
+## Arranque en un clic (recomendado)
+
+```powershell
+# Levanta TODO el stack (portal :8000 + OpenWA :2785 + puente :2786),
+# reconecta la sesion de WhatsApp y verifica que todo responde.
+.\integrations\whatsapp-juchlm\start_stack.ps1
+
+# Detener todo (reinicio limpio)
+.\integrations\whatsapp-juchlm\stop_stack.ps1
+```
+
+El lanzador es **idempotente**: comprueba cada puerto y solo levanta lo que falta; además
+reconecta la sesión (`POST /api/sessions/{uuid}/start`) y vuelve a registrar el webhook si
+no estuviera. Medido en arranque en frío: **~59 s hasta "todo en pie"** (OpenWA ~46 s,
+sesión ~10 s). Opciones: `-SinPuente`, `-SinSesion`, `-EsperaOpenWA <seg>`.
+
+> ¿Por qué existe? Cada reinicio de la máquina dejaba al bot "mudo" (los 3 procesos caídos y
+> la sesión de WhatsApp en `disconnected`). Con este script, un reinicio se recupera en un clic.
+
 ## Puesta en marcha (Fase 0 → 3)
 
 ```powershell
